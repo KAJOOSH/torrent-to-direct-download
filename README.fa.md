@@ -37,8 +37,6 @@
 
 ## نصب سریع
 
-عبارت `YOUR_GITHUB_USERNAME` را با نام کاربری GitHub خود جایگزین کنید:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
 ```
