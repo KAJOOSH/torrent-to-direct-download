@@ -38,13 +38,13 @@ No domain name is required. The installer can obtain a trusted Let's Encrypt cer
 Replace `YOUR_GITHUB_USERNAME` with your GitHub username:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/qbittorrent-direct-download-server/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
 ```
 
 Install with a specific public IP and email:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/qbittorrent-direct-download-server/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
 ```
 
 For a server behind NAT:
