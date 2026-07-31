@@ -40,13 +40,13 @@
 عبارت `YOUR_GITHUB_USERNAME` را با نام کاربری GitHub خود جایگزین کنید:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/qbittorrent-direct-download-server/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
 ```
 
 نصب با IP و ایمیل مشخص:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/qbittorrent-direct-download-server/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
 ```
 
 برای سرور پشت NAT:
