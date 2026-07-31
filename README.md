@@ -35,8 +35,6 @@ No domain name is required. The installer can obtain a trusted Let's Encrypt cer
 
 ## Quick install
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
 ```
