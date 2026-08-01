@@ -151,6 +151,9 @@ CERT_CERT=""
 CERT_CHAIN=""
 
 COOKIE_FILE=""
+QBT_LOGIN_HTTP_CODE=""
+QBT_LOGIN_BODY=""
+QBT_LOGIN_COOKIE_PRESENT=0
 QBT_ACTION="official latest image"
 QBT_VERSION="unknown"
 QBT_DISPLAY_USER=""
@@ -182,6 +185,7 @@ show_error() {
         echo
         echo "Recent qBittorrent service logs:"
         journalctl -u "${QBT_SERVICE_NAME}.service" -n 50 --no-pager || true
+        docker logs --tail 80 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
     fi
 
     if command -v nginx >/dev/null 2>&1; then
@@ -490,6 +494,7 @@ wait_for_qbittorrent_webui() {
         if ! systemctl is-active --quiet "${QBT_SERVICE_NAME}.service"; then
             echo "The qBittorrent service stopped unexpectedly."
             journalctl -u "${QBT_SERVICE_NAME}.service" -n 100 --no-pager
+            docker logs --tail 100 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
             exit 1
         fi
 
@@ -497,8 +502,8 @@ wait_for_qbittorrent_webui() {
             --silent \
             --fail \
             --max-time 2 \
-            -H "Host: ${LOCAL_HOST}" \
-            "${API_URL}/" \
+            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
+            "http://localhost:${WEBUI_PORT}/" \
             >/dev/null 2>&1; then
             ready=1
             break
@@ -510,6 +515,7 @@ wait_for_qbittorrent_webui() {
     if [[ "${ready}" -ne 1 ]]; then
         echo "The qBittorrent Web UI did not start on port ${WEBUI_PORT}."
         journalctl -u "${QBT_SERVICE_NAME}.service" -n 100 --no-pager
+        docker logs --tail 100 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
         exit 1
     fi
 }
@@ -534,16 +540,29 @@ get_qbittorrent_version() {
     printf '%s' "${version}"
 }
 
+strip_ansi_and_whitespace() {
+    sed \
+        -e $'s/\033\\[[0-9;]*[[:alpha:]]//g' \
+        -e 's/\r//g' \
+        -e 's/^[[:space:]]*//' \
+        -e 's/[[:space:]]*$//'
+}
+
 get_initial_qbittorrent_password() {
     local password=""
+    local logs=""
 
     for _ in $(seq 1 45); do
+        # Read only the current container logs first. This prevents a
+        # temporary password from an older systemd run being selected.
+        logs="$(
+            docker logs --since 10m "${QBT_CONTAINER_NAME}" 2>&1 ||
+            true
+        )"
+
         password="$(
-            journalctl \
-                -u "${QBT_SERVICE_NAME}.service" \
-                --since "10 minutes ago" \
-                --no-pager \
-                -o cat |
+            printf '%s\n' "${logs}" |
+            strip_ansi_and_whitespace |
             sed -nE \
                 's/^.*A temporary password is provided for this session:[[:space:]]*([^[:space:]]+).*$/\1/p' |
             tail -n 1
@@ -562,17 +581,68 @@ get_initial_qbittorrent_password() {
 qbt_api_login() {
     local username="$1"
     local password="$2"
+    local response_file=""
 
-    curl \
-        --silent \
-        --show-error \
-        --cookie-jar "${COOKIE_FILE}" \
-        --cookie "${COOKIE_FILE}" \
-        -H "Host: ${LOCAL_HOST}" \
-        -H "Referer: http://${LOCAL_HOST}/" \
-        --data-urlencode "username=${username}" \
-        --data-urlencode "password=${password}" \
-        "${API_URL}/api/v2/auth/login"
+    QBT_LOGIN_HTTP_CODE=""
+    QBT_LOGIN_BODY=""
+    QBT_LOGIN_COOKIE_PRESENT=0
+
+    response_file="$(mktemp)"
+    : > "${COOKIE_FILE}"
+
+    QBT_LOGIN_HTTP_CODE="$(
+        curl \
+            --silent \
+            --show-error \
+            --output "${response_file}" \
+            --write-out "%{http_code}" \
+            --cookie-jar "${COOKIE_FILE}" \
+            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
+            -H "Referer: http://localhost:${WEBUI_PORT}" \
+            -H "Origin: http://localhost:${WEBUI_PORT}" \
+            --data-urlencode "username=${username}" \
+            --data-urlencode "password=${password}" \
+            "http://localhost:${WEBUI_PORT}/api/v2/auth/login" ||
+        true
+    )"
+
+    QBT_LOGIN_BODY="$(
+        tr -d '\r\n' < "${response_file}" |
+        strip_ansi_and_whitespace
+    )"
+
+    rm -f "${response_file}"
+
+    if grep -Eq '(^|[[:space:]])SID[[:space:]]' "${COOKIE_FILE}" 2>/dev/null; then
+        QBT_LOGIN_COOKIE_PRESENT=1
+    fi
+
+    # The official API defines the SID cookie as the successful-login
+    # indicator. Do not depend only on the optional "Ok." response body.
+    [[ "${QBT_LOGIN_HTTP_CODE}" == "200" &&
+       "${QBT_LOGIN_COOKIE_PRESENT}" -eq 1 ]]
+}
+
+reset_qbittorrent_webui_auth() {
+    local backup_file=""
+
+    echo
+    echo "Resetting qBittorrent Web UI authentication and requesting a new temporary password..."
+
+    systemctl stop "${QBT_SERVICE_NAME}.service" 2>/dev/null || true
+    docker rm -f "${QBT_CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+    if [[ -f "${QBT_DOCKER_CONFIG_FILE}" ]]; then
+        backup_file="${QBT_DOCKER_CONFIG_FILE}.auth-backup.$(date +%Y%m%d-%H%M%S)"
+        cp -a "${QBT_DOCKER_CONFIG_FILE}" "${backup_file}"
+
+        sed -i -E \
+            '/^WebUI\\(Password_PBKDF2|Password_ha1|Password|Username)=/d' \
+            "${QBT_DOCKER_CONFIG_FILE}"
+    fi
+
+    systemctl restart "${QBT_SERVICE_NAME}.service"
+    wait_for_qbittorrent_webui
 }
 
 backup_existing_native_service() {
@@ -658,7 +728,7 @@ TimeoutStartSec=0
 TimeoutStopSec=1810
 
 ExecStartPre=-/usr/bin/docker rm -f ${QBT_CONTAINER_NAME}
-ExecStart=/usr/bin/docker run --name ${QBT_CONTAINER_NAME} --read-only --stop-timeout 1800 --tmpfs /tmp -e QBT_LEGAL_NOTICE=confirm -e QBT_TORRENTING_PORT=${TORRENT_PORT} -e QBT_WEBUI_PORT=${WEBUI_PORT} -e UMASK=022 -p ${TORRENT_PORT}:${TORRENT_PORT}/tcp -p ${TORRENT_PORT}:${TORRENT_PORT}/udp -p ${WEBUI_PORT}:${WEBUI_PORT}/tcp -v ${QBT_DOCKER_CONFIG_DIR}:/config -v ${DOWNLOAD_DIR}:/downloads -v ${INCOMPLETE_DIR}:/downloads/incomplete -v ${DOWNLOAD_DIR}:${DOWNLOAD_DIR} -v ${INCOMPLETE_DIR}:${INCOMPLETE_DIR} ${QBT_IMAGE}
+ExecStart=/usr/bin/docker run -t --name ${QBT_CONTAINER_NAME} --read-only --stop-timeout 1800 --tmpfs /tmp -e QBT_LEGAL_NOTICE=confirm -e QBT_TORRENTING_PORT=${TORRENT_PORT} -e QBT_WEBUI_PORT=${WEBUI_PORT} -e UMASK=022 -p ${TORRENT_PORT}:${TORRENT_PORT}/tcp -p ${TORRENT_PORT}:${TORRENT_PORT}/udp -p ${WEBUI_PORT}:${WEBUI_PORT}/tcp -v ${QBT_DOCKER_CONFIG_DIR}:/config -v ${DOWNLOAD_DIR}:/downloads -v ${INCOMPLETE_DIR}:/downloads/incomplete -v ${DOWNLOAD_DIR}:${DOWNLOAD_DIR} -v ${INCOMPLETE_DIR}:${INCOMPLETE_DIR} ${QBT_IMAGE}
 ExecStop=/usr/bin/docker stop -t 1800 ${QBT_CONTAINER_NAME}
 
 StandardOutput=journal
@@ -675,34 +745,58 @@ EOF
 
 configure_qbittorrent_via_api() {
     local initial_password=""
-    local login_response=""
     local preferences_json=""
     local settings_status=""
-    local verify_response=""
+    local login_attempt=1
 
     if [[ -z "${WEBUI_PASSWORD}" ]]; then
         WEBUI_PASSWORD="$(openssl rand -hex 18)"
     fi
 
-    initial_password="$(get_initial_qbittorrent_password)"
-
-    if [[ -z "${initial_password}" ]]; then
-        echo "The temporary qBittorrent Web UI password could not be found."
-        journalctl -u "${QBT_SERVICE_NAME}.service" -n 120 --no-pager
-        exit 1
-    fi
-
     COOKIE_FILE="$(mktemp)"
 
-    login_response="$(qbt_api_login "${WEBUI_USER}" "${initial_password}")"
+    while (( login_attempt <= 2 )); do
+        initial_password="$(get_initial_qbittorrent_password)"
 
-    if [[ "${login_response}" != "Ok." ]]; then
-        echo "Initial qBittorrent API login failed."
-        echo "API response: ${login_response}"
+        if [[ -z "${initial_password}" ]]; then
+            if (( login_attempt == 1 )); then
+                reset_qbittorrent_webui_auth
+                login_attempt=$((login_attempt + 1))
+                continue
+            fi
+
+            echo "The temporary qBittorrent Web UI password could not be found."
+            docker logs --tail 150 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
+            exit 1
+        fi
+
+        if qbt_api_login "${WEBUI_USER}" "${initial_password}"; then
+            break
+        fi
+
+        if (( login_attempt == 1 )); then
+            echo
+            echo "The first Web UI login attempt failed."
+            echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
+            echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
+            echo "A fresh temporary password will be generated automatically."
+
+            reset_qbittorrent_webui_auth
+            login_attempt=$((login_attempt + 1))
+            continue
+        fi
+
+        echo
+        echo "Initial qBittorrent API login failed after automatic recovery."
+        echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
+        echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
+        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
         echo "Username: ${WEBUI_USER}"
-        echo "Temporary password: ${initial_password}"
+        echo
+        echo "Current container logs:"
+        docker logs --tail 150 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
         exit 1
-    fi
+    done
 
     preferences_json="$(
         jq -n \
@@ -736,12 +830,13 @@ configure_qbittorrent_via_api() {
             --silent \
             --show-error \
             --cookie "${COOKIE_FILE}" \
-            -H "Host: ${LOCAL_HOST}" \
-            -H "Referer: http://${LOCAL_HOST}/" \
+            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
+            -H "Referer: http://localhost:${WEBUI_PORT}" \
+            -H "Origin: http://localhost:${WEBUI_PORT}" \
             --output /dev/null \
             --write-out "%{http_code}" \
             --data-urlencode "json=${preferences_json}" \
-            "${API_URL}/api/v2/app/setPreferences"
+            "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences"
     )"
 
     if [[ "${settings_status}" != "200" ]]; then
@@ -754,11 +849,12 @@ configure_qbittorrent_via_api() {
     COOKIE_FILE="$(mktemp)"
     sleep 1
 
-    verify_response="$(qbt_api_login "${WEBUI_USER}" "${WEBUI_PASSWORD}")"
-
-    if [[ "${verify_response}" != "Ok." ]]; then
-        echo "The permanent Web UI password could not be verified."
-        echo "API response: ${verify_response}"
+    if ! qbt_api_login "${WEBUI_USER}" "${WEBUI_PASSWORD}"; then
+        echo
+        echo "The permanent Web UI password was saved but could not be verified."
+        echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
+        echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
+        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
         exit 1
     fi
 
@@ -840,6 +936,17 @@ ensure_latest_qbittorrent() {
         QBT_ACTION="reused official latest image"
         wait_for_qbittorrent_webui
         QBT_VERSION="$(get_qbittorrent_version)"
+
+        # A previous installer run may have created the container but failed
+        # before saving Docker-specific credentials. Complete that interrupted
+        # setup automatically instead of skipping authentication setup.
+        if [[ ! -f "${QBT_CREDENTIAL_FILE}" ]] ||
+           ! grep -Fq "Deployment: Official Docker image" "${QBT_CREDENTIAL_FILE}"; then
+            configure_qbittorrent_via_api
+            systemctl restart "${QBT_SERVICE_NAME}.service"
+            wait_for_qbittorrent_webui
+        fi
+
         read_existing_qbittorrent_credentials
         return
     fi
