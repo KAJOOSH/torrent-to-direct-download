@@ -1,56 +1,60 @@
 <div dir="rtl">
 
-# سرور دانلود مستقیم با qBittorrent
+# تبدیل تورنت به دانلود مستقیم
 
 [English](README.md)
 
-یک نصب‌کننده ساده برای Ubuntu که فایل‌ها را با qBittorrent دانلود می‌کند و پس از کامل‌شدن، آن‌ها را به‌صورت لینک دانلود مستقیم HTTP و HTTPS در اختیار کاربران قرار می‌دهد.
+این پروژه یک سرور Ubuntu را به سرور ساده‌ی **دانلود تورنت و ارائه لینک مستقیم** تبدیل می‌کند.
 
-## هدف پروژه
+لینک Magnet یا فایل Torrent را داخل qBittorrent وارد می‌کنید؛ سرور فایل را دانلود می‌کند و پس از کامل‌شدن، فایل از طریق HTTP و HTTPS معتبر در اختیار کاربران قرار می‌گیرد.
 
-هدف این پروژه تبدیل یک سرور Ubuntu به یک سرور دانلود ساده است:
+## سرویس‌های Docker
 
-1. لینک Magnet یا فایل Torrent را داخل qBittorrent وارد می‌کنید.
-2. سرور فایل را از شبکه تورنت دانلود می‌کند.
-3. فایل کامل‌شده با لینک مستقیم در اختیار کاربران قرار می‌گیرد.
+تمام سرویس‌های اصلی داخل Docker Compose اجرا می‌شوند:
 
-برای فعال‌سازی HTTPS نیازی به دامنه نیست و اسکریپت می‌تواند مستقیماً برای IPv4 عمومی، گواهی معتبر Let’s Encrypt دریافت کند.
-
-## امکانات اصلی
-
-- نصب و تنظیم qBittorrent-nox
-- استفاده از سرویس فعلی `qbittorrent-root` در صورت وجود
-- نصب و تنظیم Nginx
-- ارائه فایل‌ها روی HTTP و HTTPS
-- فعال‌کردن هم‌زمان پورت‌های `80` و `443`
-- دریافت SSL معتبر برای IP عمومی
+- Image رسمی و پایدار qBittorrent-nox
+- Image رسمی Nginx برای دانلود مستقیم
+- Image رسمی Certbot برای SSL معتبر Let’s Encrypt روی IP عمومی
 - تمدید خودکار گواهی SSL
-- امکان اجرای مجدد اسکریپت بدون نصب دوباره غیرضروری
+
+اگر Docker و Docker Compose نصب نباشند، اسکریپت آن‌ها را از مخزن رسمی Docker نصب می‌کند.
 
 ## پیش‌نیازها
 
-- سرور Ubuntu
-- دسترسی root یا sudo
+- Ubuntu نسخه 22.04، 24.04، 25.10 یا 26.04
+- دسترسی root
 - IPv4 عمومی
-- دسترسی عمومی به TCP پورت‌های `80` و `443`
+- بازبودن TCP پورت‌های `80`، `443` و `8080`
+- بازبودن TCP و UDP پورت `49160` برای تورنت
 - Port Forward در صورت قرارداشتن سرور پشت NAT
+
+پورت‌ها باید در فایروال پنل VPS یا شرکت میزبان نیز باز باشند.
 
 ## نصب سریع
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo bash /tmp/install.sh
 ```
 
-نصب با IP و ایمیل مشخص:
+نصب پیشنهادی همراه ایمیل Let’s Encrypt:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo env \
+    LETSENCRYPT_EMAIL=admin@example.com \
+    bash /tmp/install.sh
 ```
 
-برای سرور پشت NAT:
+برای سرور پشت NAT، IP عمومی را مشخص کنید:
 
 ```bash
-sudo env   PUBLIC_IP=YOUR_PUBLIC_IP   BIND_ADDRESS=0.0.0.0   LETSENCRYPT_EMAIL=admin@example.com   bash /tmp/install.sh
+sudo env \
+  PUBLIC_IP=YOUR_PUBLIC_IP \
+  LETSENCRYPT_EMAIL=admin@example.com \
+  bash /tmp/install.sh
 ```
 
 ## آدرس‌ها پس از نصب
@@ -64,43 +68,33 @@ http://PUBLIC_IP/
 https://PUBLIC_IP/
 ```
 
-## دستورهای کاربردی
-
-مشاهده اطلاعات ورود qBittorrent:
+نام کاربری و رمز تولیدشده qBittorrent در این فایل ذخیره می‌شود:
 
 ```bash
 sudo cat /root/qbittorrent-credentials.txt
 ```
 
-مشاهده اطلاعات SSL:
+## به‌روزرسانی
+
+همان اسکریپت نصب را دوباره اجرا کنید. Imageهای رسمی جدید دریافت می‌شوند و فایل‌های دانلودشده، وضعیت تورنت‌ها و رمز فعلی حفظ خواهند شد.
+
+## بازنشانی رمز qBittorrent
 
 ```bash
-sudo cat /root/qbittorrent-ip-ssl-info.txt
-```
-
-بررسی سرویس‌ها:
-
-```bash
-sudo systemctl status qbittorrent-root
-sudo systemctl status nginx
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo env RESET_QBT_PASSWORD=1 bash /tmp/install.sh
 ```
 
 ## نکات مهم
 
-- پورت TCP شماره `80` باید برای تمدید SSL از اینترنت قابل دسترسی بماند.
-- IP عمومی باید روی سرور باقی بماند یا به آن Port Forward شده باشد.
-- پوشه دانلود به‌صورت پیش‌فرض رمز ندارد و عمومی است.
-- هر شخصی که به پورت `80` یا `443` دسترسی داشته باشد، می‌تواند فایل‌های کامل‌شده را ببیند و دانلود کند.
-- فقط برای فایل‌هایی استفاده کنید که اجازه قانونی دانلود و اشتراک‌گذاری آن‌ها را دارید.
+- فایل‌های کامل‌شده روی پورت‌های `80` و `443` عمومی و بدون رمز هستند.
+- برای تمدید SSL، پورت `80` باید از اینترنت در دسترس باقی بماند.
+- پنل qBittorrent دارای رمز تصادفی قوی است، اما روی پورت `8080` با HTTP ارائه می‌شود.
+- فقط محتوایی را دانلود یا منتشر کنید که اجازه قانونی استفاده و اشتراک‌گذاری آن را دارید.
 
-## توضیح پیشنهادی مخزن
+## هدف پروژه
 
-```text
-دانلود تورنت روی Ubuntu و ارائه فایل‌های کامل‌شده به کاربران به‌صورت لینک دانلود مستقیم HTTP و HTTPS.
-```
-
-## مجوز استفاده
-
-استفاده و تغییر این پروژه با مسئولیت خود کاربر انجام می‌شود.
+هدف پروژه ایجاد یک سرور کوچک و شخصی است که فایل را از شبکه BitTorrent دریافت کند و پس از تکمیل دانلود، همان فایل را به‌صورت لینک مستقیم معمولی در اختیار کاربران، مرورگرها، پخش‌کننده‌ها یا دانلود منیجرها قرار دهد.
 
 </div>

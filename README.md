@@ -1,102 +1,94 @@
-# qBittorrent Direct Download Server
+# Torrent to Direct Download
 
-[فارسی](README.fa.md)
+[راهنمای فارسی](README.fa.md)
 
-A simple Ubuntu installer that downloads files through qBittorrent and makes completed files available to users as direct HTTP and HTTPS downloads.
+Turn an Ubuntu server into a simple torrent-to-direct-download server.
 
-## Project goal
+Add a torrent or magnet link in qBittorrent. The server downloads it, and completed files become available to users through direct HTTP and trusted HTTPS links.
 
-The goal of this project is to turn an Ubuntu server into a simple download server:
+## What runs in Docker
 
-1. Add a torrent or magnet link to qBittorrent.
-2. Let the server download the files.
-3. Share the completed files with users through direct download links.
+- Official qBittorrent-nox image using the latest stable tag
+- Official Nginx image for direct file downloads
+- Official Certbot image for trusted Let's Encrypt IP certificates
+- Automatic certificate renewal
 
-No domain name is required. The installer can obtain a trusted Let's Encrypt certificate directly for a public IPv4 address.
-
-## Main features
-
-- Installs and configures qBittorrent-nox
-- Reuses an existing `qbittorrent-root` service when available
-- Installs and configures Nginx
-- Publishes completed downloads over HTTP and HTTPS
-- Uses ports `80` and `443`
-- Obtains a trusted SSL certificate for a public IPv4
-- Enables automatic SSL renewal
-- Keeps the installation safe to run again
+The installer also installs Docker Engine and Docker Compose from Docker's official Ubuntu repository when they are missing.
 
 ## Requirements
 
-- Ubuntu server
-- Root or sudo access
+- Ubuntu 22.04, 24.04, 25.10, or 26.04
+- Root access
 - A public IPv4 address
-- Public access to TCP ports `80` and `443`
+- Public TCP ports `80`, `443`, and `8080`
+- Public TCP/UDP torrent port `49160`
 - Port forwarding when the server is behind NAT
+
+The provider or cloud firewall must allow the same ports.
 
 ## Quick install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo bash /tmp/install.sh
 ```
 
-Install with a specific public IP and email:
+Recommended installation with an email address:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh   -o /tmp/install.sh   && sudo env     PUBLIC_IP=YOUR_PUBLIC_IP     LETSENCRYPT_EMAIL=admin@example.com     bash /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo env \
+    LETSENCRYPT_EMAIL=admin@example.com \
+    bash /tmp/install.sh
 ```
 
-For a server behind NAT:
+For a server behind NAT, provide the public IP explicitly:
 
 ```bash
-sudo env   PUBLIC_IP=YOUR_PUBLIC_IP   BIND_ADDRESS=0.0.0.0   LETSENCRYPT_EMAIL=admin@example.com   bash /tmp/install.sh
+sudo env \
+  PUBLIC_IP=YOUR_PUBLIC_IP \
+  LETSENCRYPT_EMAIL=admin@example.com \
+  bash /tmp/install.sh
 ```
 
 ## Addresses after installation
 
 ```text
-qBittorrent Web UI:
+qBittorrent WebUI:
 http://PUBLIC_IP:8080
 
-Direct download:
+Direct downloads:
 http://PUBLIC_IP/
 https://PUBLIC_IP/
 ```
 
-## Useful commands
-
-View qBittorrent credentials:
+The qBittorrent username and generated password are saved here:
 
 ```bash
 sudo cat /root/qbittorrent-credentials.txt
 ```
 
-View SSL information:
+## Update
+
+Run the same installer again. It pulls the current official images and preserves downloads, torrent state, and the existing password.
+
+## Reset the qBittorrent password
 
 ```bash
-sudo cat /root/qbittorrent-ip-ssl-info.txt
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
+  -o /tmp/install.sh \
+  && sudo env RESET_QBT_PASSWORD=1 bash /tmp/install.sh
 ```
 
-Check services:
+## Important
 
-```bash
-sudo systemctl status qbittorrent-root
-sudo systemctl status nginx
-```
+- Completed files on ports `80` and `443` are public and have no password.
+- Port `80` must remain publicly reachable for certificate renewal.
+- The qBittorrent WebUI is protected with a generated password but is served over HTTP on port `8080`.
+- Use the project only for content you are legally allowed to download and share.
 
-## Important notes
+## Project goal
 
-- TCP port `80` must remain publicly accessible for SSL renewal.
-- The public IP must remain assigned or forwarded to the server.
-- The download directory is public and has no password by default.
-- Anyone who can access ports `80` or `443` can list and download completed files.
-- Use this project only for files you are legally allowed to download and share.
-
-## Repository description
-
-```text
-Download torrents on Ubuntu and serve completed files as direct HTTP/HTTPS downloads with qBittorrent, Nginx, and trusted IP SSL.
-```
-
-## License
-
-Use and modify this project at your own responsibility.
+This project is intended for people who want a small self-hosted server that receives files from the BitTorrent network and then offers those completed files as ordinary direct downloads for users, browsers, media players, or download managers.

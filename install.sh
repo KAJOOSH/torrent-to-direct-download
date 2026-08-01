@@ -2,147 +2,61 @@
 set -Eeuo pipefail
 umask 077
 
-# =====================================================================
-# qBittorrent-nox + Nginx + Trusted Let's Encrypt IP SSL for Ubuntu
-# =====================================================================
+# torrent-to-direct-download
+# Fully containerized qBittorrent + Nginx + Certbot installer for Ubuntu.
 #
-# This script is idempotent and can be run more than once.
+# Runtime services:
+#   - qBittorrent: official qbittorrentofficial/qbittorrent-nox image
+#   - Nginx: official nginx stable Alpine image
+#   - Certbot: official certbot/certbot image
 #
-# qBittorrent:
-#   - Uses the official qbittorrentofficial/qbittorrent-nox Docker image.
-#   - Pulls the "latest" tag to obtain the latest stable qBittorrent.
-#   - Migrates the previous native root installation when it is detected.
-#   - Reuses the current container when it already uses the latest image.
-#
-# Nginx:
-#   - Installs Nginx only when it is missing.
-#   - Publishes the completed qBittorrent download directory.
-#   - Serves the same files over both HTTP port 80 and HTTPS port 443.
-#   - Keeps HTTP active; it does not redirect port 80 to HTTPS.
-#
-# SSL:
-#   - Obtains a publicly trusted certificate directly for a public IPv4.
-#   - No domain name is required.
-#   - Uses Let's Encrypt's required "shortlived" certificate profile.
-#   - Uses Certbot 5.4 or newer from the official Snap package.
-#   - Configures automatic renewal and automatic Nginx reload.
-#
-# Requirements:
-#   - A stable, globally routable public IPv4 address.
-#   - TCP port 80 reachable from the public Internet.
-#   - TCP port 443 reachable from the public Internet.
-#   - If the server is behind NAT, forward ports 80 and 443 to this host
-#     and run with BIND_ADDRESS=0.0.0.0.
-#   - Cloud-provider firewalls must also allow TCP 80 and TCP 443.
-#
-# Run:
-#   sudo -i
-#   chmod +x install-qbittorrent-nginx-ip-ssl-root.sh
-#   ./install-qbittorrent-nginx-ip-ssl-root.sh
-#
-# Optional environment variables:
-#
-#   PUBLIC_IP=203.0.113.10
-#       Public IPv4 to place in the certificate.
-#       When omitted, the script tries to detect it automatically.
-#
-#   BIND_ADDRESS=203.0.113.10
-#       Local address on which Nginx listens.
-#       Auto-detected by default. Use 0.0.0.0 behind NAT.
-#
-#   LETSENCRYPT_EMAIL=admin@example.com
-#       Optional Let's Encrypt account email.
-#       When omitted, registration is performed without an email address.
-#
-#   LETSENCRYPT_STAGING=0
-#       Set to 1 only for testing. Staging certificates are not trusted.
-#       Default 0 obtains a publicly trusted production certificate.
-#
-#   WEBUI_PORT=8080
-#   TORRENT_PORT=49160
-#   BASE_DIR=/srv/qbittorrent
-#   DOWNLOAD_DIR=/srv/qbittorrent/downloads
-#   INCOMPLETE_DIR=/srv/qbittorrent/incomplete
-#   WEBUI_USER=admin
-#   WEBUI_PASSWORD='YourStrongPassword'
-#
-# Example for a server behind NAT:
-#
-#   PUBLIC_IP=198.51.100.20 \
-#   BIND_ADDRESS=0.0.0.0 \
-#   LETSENCRYPT_EMAIL=admin@example.com \
-#   ./install-qbittorrent-nginx-ip-ssl-root.sh
-#
-# Security notes:
-#   - The installer and systemd service run as root.
-#   - qBittorrent uses the official container's default unprivileged user.
-#   - Download listing has no authentication by default.
-#   - Anyone who can reach ports 80 or 443 can list and download files.
-# =====================================================================
+# The installer itself runs on the Ubuntu host as root and creates a
+# Docker Compose stack under /opt/torrent-to-direct-download.
 
-WEBUI_PORT="${WEBUI_PORT:-8080}"
-TORRENT_PORT="${TORRENT_PORT:-49160}"
+SCRIPT_VERSION="2.1.0"
+STACK_NAME="torrent-to-direct-download"
+STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
+DATA_DIR="${DATA_DIR:-/srv/qbittorrent}"
 
-BASE_DIR="${BASE_DIR:-/srv/qbittorrent}"
+QBT_CONFIG_DIR="${QBT_CONFIG_DIR:-${DATA_DIR}/config}"
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-${DATA_DIR}/downloads}"
+INCOMPLETE_DIR="${INCOMPLETE_DIR:-${DATA_DIR}/incomplete}"
+LETSENCRYPT_DIR="${LETSENCRYPT_DIR:-${DATA_DIR}/letsencrypt}"
+ACME_DIR="${ACME_DIR:-${DATA_DIR}/acme}"
 
-DOWNLOAD_DIR_WAS_SET=0
-INCOMPLETE_DIR_WAS_SET=0
+COMPOSE_FILE="${STACK_DIR}/compose.yaml"
+ENV_FILE="${STACK_DIR}/.env"
+NGINX_CONF_DIR="${STACK_DIR}/nginx/conf.d"
+NGINX_ENTRYPOINT_DIR="${STACK_DIR}/nginx/entrypoint"
 
-if [[ -n "${DOWNLOAD_DIR+x}" ]]; then
-    DOWNLOAD_DIR_WAS_SET=1
-fi
-
-if [[ -n "${INCOMPLETE_DIR+x}" ]]; then
-    INCOMPLETE_DIR_WAS_SET=1
-fi
-
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-${BASE_DIR}/downloads}"
-INCOMPLETE_DIR="${INCOMPLETE_DIR:-${BASE_DIR}/incomplete}"
-
-WEBUI_USER="${WEBUI_USER:-admin}"
-WEBUI_PASSWORD="${WEBUI_PASSWORD:-}"
-
-PUBLIC_IP="${PUBLIC_IP:-}"
-BIND_ADDRESS="${BIND_ADDRESS:-}"
-LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
-LETSENCRYPT_STAGING="${LETSENCRYPT_STAGING:-0}"
-
-QBT_SERVICE_NAME="qbittorrent-root"
-QBT_SERVICE_FILE="/etc/systemd/system/${QBT_SERVICE_NAME}.service"
-QBT_CONFIG_DIR="/root/.config/qBittorrent"
-QBT_CONFIG_FILE="${QBT_CONFIG_DIR}/qBittorrent.conf"
-QBT_CREDENTIAL_FILE="/root/qbittorrent-credentials.txt"
+QBT_CONTAINER="ttdd-qbittorrent"
+NGINX_CONTAINER="ttdd-nginx"
+CERTBOT_RENEW_CONTAINER="ttdd-certbot-renew"
 
 QBT_IMAGE="${QBT_IMAGE:-qbittorrentofficial/qbittorrent-nox:latest}"
-QBT_CONTAINER_NAME="qbittorrent-nox"
-QBT_DOCKER_CONFIG_DIR="${BASE_DIR}/config"
-QBT_DOCKER_QBT_CONFIG_DIR="${QBT_DOCKER_CONFIG_DIR}/qBittorrent/config"
-QBT_DOCKER_QBT_DATA_DIR="${QBT_DOCKER_CONFIG_DIR}/qBittorrent/data"
-QBT_DOCKER_CONFIG_FILE="${QBT_DOCKER_QBT_CONFIG_DIR}/qBittorrent.conf"
-QBT_NATIVE_DATA_DIR="/root/.local/share/qBittorrent"
-QBT_IMAGE_ID=""
-QBT_CONTAINER_IMAGE_ID=""
+NGINX_IMAGE="${NGINX_IMAGE:-nginx:stable-alpine}"
+CERTBOT_IMAGE="${CERTBOT_IMAGE:-certbot/certbot:latest}"
 
-NGINX_SITE_NAME="qbittorrent-downloads"
-NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf"
-NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}.conf"
-NGINX_ACCESS_LOG="/var/log/nginx/${NGINX_SITE_NAME}.access.log"
-NGINX_ERROR_LOG="/var/log/nginx/${NGINX_SITE_NAME}.error.log"
+WEBUI_BIND="${WEBUI_BIND:-0.0.0.0}"
+WEBUI_PORT="${WEBUI_PORT:-8080}"
+TORRENT_PORT="${TORRENT_PORT:-49160}"
+TIMEZONE="${TIMEZONE:-UTC}"
 
-ACME_WEBROOT="/var/www/qbittorrent-acme"
-LETSENCRYPT_HOOK_DIR="/etc/letsencrypt/renewal-hooks/deploy"
-LETSENCRYPT_RELOAD_HOOK="${LETSENCRYPT_HOOK_DIR}/reload-nginx.sh"
+QBT_USERNAME="${QBT_USERNAME:-admin}"
+QBT_PASSWORD="${QBT_PASSWORD:-}"
+RESET_QBT_PASSWORD="${RESET_QBT_PASSWORD:-0}"
 
-FALLBACK_RENEW_SERVICE="/etc/systemd/system/qbittorrent-ip-cert-renew.service"
-FALLBACK_RENEW_TIMER="/etc/systemd/system/qbittorrent-ip-cert-renew.timer"
+PUBLIC_IP="${PUBLIC_IP:-}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
+LETSENCRYPT_STAGING="${LETSENCRYPT_STAGING:-0}"
+RUN_RENEWAL_DRY_RUN="${RUN_RENEWAL_DRY_RUN:-1}"
 
+CREDENTIAL_FILE="/root/qbittorrent-credentials.txt"
 DOWNLOAD_INFO_FILE="/root/qbittorrent-download-info.txt"
 SSL_INFO_FILE="/root/qbittorrent-ip-ssl-info.txt"
+STATE_FILE="${STACK_DIR}/.installation-complete"
+INSTALL_COMPLETE=0
 
-API_URL="http://127.0.0.1:${WEBUI_PORT}"
-LOCAL_HOST="localhost:${WEBUI_PORT}"
-
-CERTBOT_BIN="/snap/bin/certbot"
 CERT_NAME=""
 CERT_LIVE_DIR=""
 CERT_FULLCHAIN=""
@@ -150,208 +64,226 @@ CERT_PRIVATE_KEY=""
 CERT_CERT=""
 CERT_CHAIN=""
 
-COOKIE_FILE=""
-QBT_LOGIN_HTTP_CODE=""
-QBT_LOGIN_BODY=""
-QBT_LOGIN_COOKIE_PRESENT=0
-QBT_ACTION="official latest image"
-QBT_VERSION="unknown"
-QBT_DISPLAY_USER=""
-QBT_DISPLAY_PASSWORD=""
-UFW_STATUS="Inactive or not installed"
-CERTBOT_VERSION="unknown"
-CERTIFICATE_STATUS="unknown"
-RENEWAL_SCHEDULER="unknown"
+BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
+QBT_CONFIG_FILE="${QBT_CONFIG_DIR}/qBittorrent/config/qBittorrent.conf"
+QBT_DATA_DIR="${QBT_CONFIG_DIR}/qBittorrent/data"
 
-cleanup() {
-    if [[ -n "${COOKIE_FILE:-}" && -f "${COOKIE_FILE}" ]]; then
-        rm -f "${COOKIE_FILE}"
-    fi
+compose() {
+    docker compose \
+        --project-name "${STACK_NAME}" \
+        --env-file "${ENV_FILE}" \
+        --file "${COMPOSE_FILE}" \
+        "$@"
 }
 
-show_error() {
+log() {
+    printf '\n>>> %s\n' "$*"
+}
+
+die() {
+    printf '\nERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+on_error() {
     local exit_code=$?
-    local line_number="$1"
+    local line_number="${1:-unknown}"
 
-    echo
-    echo "================================================================"
-    echo "The script failed"
-    echo "Line: ${line_number}"
-    echo "Exit code: ${exit_code}"
-    echo "================================================================"
+    printf '\n============================================================\n' >&2
+    printf 'Installation failed at line %s (exit code %s).\n' \
+        "${line_number}" "${exit_code}" >&2
+    printf '============================================================\n' >&2
 
-    if systemctl list-unit-files 2>/dev/null |
-        grep -q "^${QBT_SERVICE_NAME}.service"; then
-        echo
-        echo "Recent qBittorrent service logs:"
-        journalctl -u "${QBT_SERVICE_NAME}.service" -n 50 --no-pager || true
-        docker logs --tail 80 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
-    fi
+    if command -v docker >/dev/null 2>&1 \
+        && [[ -f "${COMPOSE_FILE}" ]] \
+        && [[ -f "${ENV_FILE}" ]]; then
+        printf '\nDocker Compose status:\n' >&2
+        compose ps 2>/dev/null || true
 
-    if command -v nginx >/dev/null 2>&1; then
-        echo
-        echo "Nginx configuration test:"
-        nginx -t || true
+        printf '\nRecent qBittorrent logs:\n' >&2
+        compose logs --tail=100 qbittorrent 2>/dev/null || true
 
-        echo
-        echo "Recent Nginx service logs:"
-        journalctl -u nginx.service -n 60 --no-pager || true
-    fi
+        printf '\nRecent Nginx logs:\n' >&2
+        compose logs --tail=100 nginx 2>/dev/null || true
 
-    if [[ -x "${CERTBOT_BIN}" ]]; then
-        echo
-        echo "Recent Certbot log:"
-        tail -n 60 /var/log/letsencrypt/letsencrypt.log 2>/dev/null || true
+        printf '\nRecent Certbot renewal logs:\n' >&2
+        compose logs --tail=100 certbot-renew 2>/dev/null || true
+
+        if [[ "${INSTALL_COMPLETE:-0}" != "1" ]]; then
+            printf '\nStopping the incomplete Compose stack. Persistent data is preserved.\n' >&2
+            compose down --remove-orphans 2>/dev/null || true
+            rm -f "${STATE_FILE}" 2>/dev/null || true
+        fi
     fi
 
     exit "${exit_code}"
 }
 
-trap cleanup EXIT
-trap 'show_error "$LINENO"' ERR
+trap 'on_error "$LINENO"' ERR
 
 require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        echo "This script must be run as root."
-        echo
-        echo "Run:"
-        echo "  sudo -i"
-        echo "  ./install-qbittorrent-nginx-ip-ssl-root.sh"
-        exit 1
-    fi
-}
-
-validate_port() {
-    local port="$1"
-    local name="$2"
-
-    if ! [[ "${port}" =~ ^[0-9]+$ ]] ||
-        (( port < 1 || port > 65535 )); then
-        echo "Invalid ${name}: ${port}"
-        exit 1
-    fi
+    [[ "${EUID}" -eq 0 ]] || die "Run this installer as root."
 }
 
 validate_boolean() {
     local value="$1"
     local name="$2"
 
-    if [[ "${value}" != "0" && "${value}" != "1" ]]; then
-        echo "${name} must be either 0 or 1."
-        exit 1
-    fi
+    [[ "${value}" == "0" || "${value}" == "1" ]] \
+        || die "${name} must be 0 or 1."
 }
 
-is_valid_ipv4() {
+validate_port() {
+    local value="$1"
+    local name="$2"
+
+    [[ "${value}" =~ ^[0-9]+$ ]] \
+        || die "${name} must be a number."
+
+    (( value >= 1 && value <= 65535 )) \
+        || die "${name} must be between 1 and 65535."
+}
+
+validate_ipv4() {
     python3 - "$1" <<'PY'
 import ipaddress
 import sys
 
 try:
-    address = ipaddress.ip_address(sys.argv[1])
+    ip = ipaddress.ip_address(sys.argv[1])
 except ValueError:
     raise SystemExit(1)
 
-raise SystemExit(0 if address.version == 4 else 1)
+raise SystemExit(0 if ip.version == 4 else 1)
 PY
 }
 
-is_public_ipv4() {
+validate_public_ipv4() {
     python3 - "$1" <<'PY'
 import ipaddress
 import sys
 
 try:
-    address = ipaddress.ip_address(sys.argv[1])
+    ip = ipaddress.ip_address(sys.argv[1])
 except ValueError:
     raise SystemExit(1)
 
-raise SystemExit(0 if address.version == 4 and address.is_global else 1)
+raise SystemExit(0 if ip.version == 4 and ip.is_global else 1)
 PY
 }
 
-package_is_installed() {
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null |
-        grep -q "install ok installed"
+require_ubuntu() {
+    [[ -r /etc/os-release ]] || die "/etc/os-release was not found."
+
+    # shellcheck disable=SC1091
+    . /etc/os-release
+
+    [[ "${ID:-}" == "ubuntu" ]] \
+        || die "This installer supports Ubuntu only."
+
+    case "${VERSION_ID:-}" in
+        22.04|24.04|25.10|26.04)
+            ;;
+        *)
+            die "Unsupported Ubuntu release: ${VERSION_ID:-unknown}"
+            ;;
+    esac
 }
 
-install_missing_apt_packages() {
-    local packages=(
-        curl
-        jq
-        openssl
-        ca-certificates
-        nginx
-        snapd
-        python3
+install_base_packages() {
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        openssl \
+        python3 \
+        python3-yaml \
         iproute2
-    )
+}
 
-    local missing=()
+install_official_docker_if_needed() {
+    if command -v docker >/dev/null 2>&1; then
+        systemctl enable --now docker.service 2>/dev/null || true
+
+        if docker info >/dev/null 2>&1 \
+            && docker compose version >/dev/null 2>&1; then
+            log "Docker Engine and Docker Compose are already available."
+            return
+        fi
+    fi
+
+    log "Installing Docker Engine and Compose from Docker's official repository."
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    # shellcheck disable=SC1091
+    . /etc/os-release
+
+    cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-${VERSION_CODENAME}}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+    apt-get update
+
+    # Remove only conflicting packages that are actually installed.
+    local conflicting_packages=()
     local package
-    local apt_updated=0
 
-    for package in "${packages[@]}"; do
-        if ! package_is_installed "${package}"; then
-            missing+=("${package}")
+    for package in \
+        docker.io \
+        docker-compose \
+        docker-compose-v2 \
+        docker-doc \
+        docker-buildx \
+        podman-docker \
+        containerd \
+        runc; do
+
+        if dpkg-query -W -f='${db:Status-Status}' "${package}" 2>/dev/null \
+            | grep -q '^installed$'; then
+            conflicting_packages+=("${package}")
         fi
     done
 
-    if (( ${#missing[@]} > 0 )); then
-        echo
-        echo "Updating Ubuntu package lists..."
-        apt-get update
-        apt_updated=1
-
-        echo
-        echo "Installing missing Ubuntu packages:"
-        printf '  %s\n' "${missing[@]}"
-
-        apt-get install -y "${missing[@]}"
-    else
-        echo "Required Ubuntu packages are already installed."
+    if (( ${#conflicting_packages[@]} > 0 )); then
+        apt-get remove -y "${conflicting_packages[@]}"
     fi
 
-    if ! command -v docker >/dev/null 2>&1; then
-        if [[ "${apt_updated}" -eq 0 ]]; then
-            echo
-            echo "Updating Ubuntu package lists..."
-            apt-get update
-        fi
+    apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
 
-        echo
-        echo "Installing Docker Engine from the Ubuntu repository..."
-        apt-get install -y docker.io
-    else
-        echo "Docker is already installed."
-    fi
+    systemctl enable --now docker
 
-    if systemctl list-unit-files 2>/dev/null | grep -q '^docker.service'; then
-        systemctl enable --now docker.service
-    fi
-
-    if ! docker info >/dev/null 2>&1; then
-        echo "Docker is installed but the Docker daemon is not available."
-        exit 1
-    fi
+    docker info >/dev/null
+    docker compose version >/dev/null
 }
 
-detect_public_ipv4() {
+detect_public_ip() {
     local endpoint
     local detected=""
 
     if [[ -n "${PUBLIC_IP}" ]]; then
-        if ! is_public_ipv4 "${PUBLIC_IP}"; then
-            echo "PUBLIC_IP is not a globally routable public IPv4:"
-            echo "  ${PUBLIC_IP}"
-            exit 1
-        fi
-
+        validate_public_ipv4 "${PUBLIC_IP}" \
+            || die "PUBLIC_IP is not a globally routable IPv4 address: ${PUBLIC_IP}"
         return
     fi
 
-    echo
-    echo "Detecting the server's public IPv4 address..."
+    log "Detecting the server's public IPv4 address."
 
     for endpoint in \
         "https://api.ipify.org" \
@@ -359,714 +291,504 @@ detect_public_ipv4() {
         "https://ifconfig.co/ip"; do
 
         detected="$(
-            curl \
-                -4 \
-                --silent \
-                --show-error \
-                --fail \
-                --max-time 10 \
-                "${endpoint}" 2>/dev/null |
-            tr -d '[:space:]' ||
-            true
+            curl -4fsS --max-time 10 "${endpoint}" 2>/dev/null \
+                | tr -d '[:space:]' \
+                || true
         )"
 
-        if [[ -n "${detected}" ]] && is_public_ipv4 "${detected}"; then
+        if [[ -n "${detected}" ]] \
+            && validate_public_ipv4 "${detected}"; then
             PUBLIC_IP="${detected}"
             break
         fi
     done
 
-    if [[ -z "${PUBLIC_IP}" ]]; then
-        echo "A public IPv4 address could not be detected."
-        echo
-        echo "Run the script again with:"
-        echo "  PUBLIC_IP=YOUR.PUBLIC.IP.ADDRESS ./install-qbittorrent-nginx-ip-ssl-root.sh"
-        exit 1
-    fi
+    [[ -n "${PUBLIC_IP}" ]] \
+        || die "Could not detect a public IPv4. Set PUBLIC_IP explicitly."
 
-    echo "Detected public IPv4: ${PUBLIC_IP}"
-}
-
-detect_bind_address() {
-    if [[ -n "${BIND_ADDRESS}" ]]; then
-        if [[ "${BIND_ADDRESS}" != "0.0.0.0" ]] &&
-            ! is_valid_ipv4 "${BIND_ADDRESS}"; then
-            echo "BIND_ADDRESS is invalid:"
-            echo "  ${BIND_ADDRESS}"
-            exit 1
-        fi
-
-        return
-    fi
-
-    if ip -4 -o address show |
-        awk '{print $4}' |
-        cut -d/ -f1 |
-        grep -Fxq "${PUBLIC_IP}"; then
-        BIND_ADDRESS="${PUBLIC_IP}"
-    else
-        BIND_ADDRESS="0.0.0.0"
-
-        echo
-        echo "The public IPv4 is not directly assigned to a local interface."
-        echo "Nginx will listen on 0.0.0.0."
-        echo
-        echo "This is valid only when NAT forwards public TCP ports 80 and 443"
-        echo "to this Ubuntu server."
-    fi
+    printf 'Public IPv4: %s\n' "${PUBLIC_IP}"
 }
 
 initialize_certificate_paths() {
-    local safe_ip
+    local safe_ip="${PUBLIC_IP//./-}"
 
-    safe_ip="${PUBLIC_IP//./-}"
     CERT_NAME="qbittorrent-ip-${safe_ip}"
-    CERT_LIVE_DIR="/etc/letsencrypt/live/${CERT_NAME}"
+    CERT_LIVE_DIR="${LETSENCRYPT_DIR}/live/${CERT_NAME}"
     CERT_FULLCHAIN="${CERT_LIVE_DIR}/fullchain.pem"
     CERT_PRIVATE_KEY="${CERT_LIVE_DIR}/privkey.pem"
     CERT_CERT="${CERT_LIVE_DIR}/cert.pem"
     CERT_CHAIN="${CERT_LIVE_DIR}/chain.pem"
 }
 
-read_existing_download_paths() {
-    local existing_download_dir=""
-    local existing_incomplete_dir=""
+stop_previous_native_services() {
+    log "Stopping previous installer-managed native services."
 
-    if [[ ! -f "${QBT_CREDENTIAL_FILE}" ]]; then
-        return
-    fi
+    if systemctl list-unit-files 2>/dev/null \
+        | grep -q '^qbittorrent-root\.service'; then
+        systemctl disable --now qbittorrent-root.service 2>/dev/null || true
 
-    if [[ "${DOWNLOAD_DIR_WAS_SET}" -eq 0 ]]; then
-        existing_download_dir="$(
-            awk '
-                /^Download Directory:$/ {
-                    if (getline > 0) {
-                        print
-                        exit
-                    }
-                }
-            ' "${QBT_CREDENTIAL_FILE}"
-        )"
-
-        if [[ -n "${existing_download_dir}" ]]; then
-            DOWNLOAD_DIR="${existing_download_dir}"
+        if [[ -f /etc/systemd/system/qbittorrent-root.service ]]; then
+            cp -a \
+                /etc/systemd/system/qbittorrent-root.service \
+                "/etc/systemd/system/qbittorrent-root.service.backup.${BACKUP_STAMP}"
         fi
     fi
 
-    if [[ "${INCOMPLETE_DIR_WAS_SET}" -eq 0 ]]; then
-        existing_incomplete_dir="$(
-            awk '
-                /^Incomplete Download Directory:$/ {
-                    if (getline > 0) {
-                        print
-                        exit
-                    }
-                }
-            ' "${QBT_CREDENTIAL_FILE}"
-        )"
+    if systemctl list-unit-files 2>/dev/null \
+        | grep -q '^nginx\.service'; then
 
-        if [[ -n "${existing_incomplete_dir}" ]]; then
-            INCOMPLETE_DIR="${existing_incomplete_dir}"
-        fi
-    fi
-}
+        if systemctl is-active --quiet nginx.service \
+            || systemctl is-enabled --quiet nginx.service 2>/dev/null; then
 
-read_existing_qbittorrent_credentials() {
-    if [[ ! -f "${QBT_CREDENTIAL_FILE}" ]]; then
-        return
-    fi
+            install -d -m 0700 /root/torrent-to-direct-download-backups
 
-    QBT_DISPLAY_USER="$(
-        awk -F': ' '/^Username: / {print $2; exit}' \
-            "${QBT_CREDENTIAL_FILE}"
-    )"
-
-    QBT_DISPLAY_PASSWORD="$(
-        awk -F': ' '/^Password: / {print $2; exit}' \
-            "${QBT_CREDENTIAL_FILE}"
-    )"
-}
-
-wait_for_qbittorrent_webui() {
-    local ready=0
-
-    for _ in $(seq 1 90); do
-        if ! systemctl is-active --quiet "${QBT_SERVICE_NAME}.service"; then
-            echo "The qBittorrent service stopped unexpectedly."
-            journalctl -u "${QBT_SERVICE_NAME}.service" -n 100 --no-pager
-            docker logs --tail 100 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
-            exit 1
-        fi
-
-        if curl \
-            --silent \
-            --fail \
-            --max-time 2 \
-            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
-            "http://localhost:${WEBUI_PORT}/" \
-            >/dev/null 2>&1; then
-            ready=1
-            break
-        fi
-
-        sleep 1
-    done
-
-    if [[ "${ready}" -ne 1 ]]; then
-        echo "The qBittorrent Web UI did not start on port ${WEBUI_PORT}."
-        journalctl -u "${QBT_SERVICE_NAME}.service" -n 100 --no-pager
-        docker logs --tail 100 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
-        exit 1
-    fi
-}
-
-get_qbittorrent_version() {
-    local version=""
-
-    if docker inspect "${QBT_CONTAINER_NAME}" >/dev/null 2>&1; then
-        version="$(
-            docker exec "${QBT_CONTAINER_NAME}" \
-                qbittorrent-nox --version 2>/dev/null |
-            grep -oE '[0-9]+(\.[0-9]+){2,3}' |
-            head -n 1 ||
-            true
-        )"
-    fi
-
-    if [[ -z "${version}" ]]; then
-        version="unknown"
-    fi
-
-    printf '%s' "${version}"
-}
-
-strip_ansi_and_whitespace() {
-    sed \
-        -e $'s/\033\\[[0-9;]*[[:alpha:]]//g' \
-        -e 's/\r//g' \
-        -e 's/^[[:space:]]*//' \
-        -e 's/[[:space:]]*$//'
-}
-
-get_initial_qbittorrent_password() {
-    local password=""
-    local logs=""
-
-    for _ in $(seq 1 45); do
-        # Read only the current container logs first. This prevents a
-        # temporary password from an older systemd run being selected.
-        logs="$(
-            docker logs --since 10m "${QBT_CONTAINER_NAME}" 2>&1 ||
-            true
-        )"
-
-        password="$(
-            printf '%s\n' "${logs}" |
-            strip_ansi_and_whitespace |
-            sed -nE \
-                's/^.*A temporary password is provided for this session:[[:space:]]*([^[:space:]]+).*$/\1/p' |
-            tail -n 1
-        )"
-
-        if [[ -n "${password}" ]]; then
-            break
-        fi
-
-        sleep 1
-    done
-
-    printf '%s' "${password}"
-}
-
-qbt_api_login() {
-    local username="$1"
-    local password="$2"
-    local response_file=""
-
-    QBT_LOGIN_HTTP_CODE=""
-    QBT_LOGIN_BODY=""
-    QBT_LOGIN_COOKIE_PRESENT=0
-
-    response_file="$(mktemp)"
-    : > "${COOKIE_FILE}"
-
-    QBT_LOGIN_HTTP_CODE="$(
-        curl \
-            --silent \
-            --show-error \
-            --output "${response_file}" \
-            --write-out "%{http_code}" \
-            --cookie-jar "${COOKIE_FILE}" \
-            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
-            -H "Referer: http://localhost:${WEBUI_PORT}" \
-            -H "Origin: http://localhost:${WEBUI_PORT}" \
-            --data-urlencode "username=${username}" \
-            --data-urlencode "password=${password}" \
-            "http://localhost:${WEBUI_PORT}/api/v2/auth/login" ||
-        true
-    )"
-
-    QBT_LOGIN_BODY="$(
-        tr -d '\r\n' < "${response_file}" |
-        strip_ansi_and_whitespace
-    )"
-
-    rm -f "${response_file}"
-
-    if grep -Eq '(^|[[:space:]])SID[[:space:]]' "${COOKIE_FILE}" 2>/dev/null; then
-        QBT_LOGIN_COOKIE_PRESENT=1
-    fi
-
-    # The official API defines the SID cookie as the successful-login
-    # indicator. Do not depend only on the optional "Ok." response body.
-    [[ "${QBT_LOGIN_HTTP_CODE}" == "200" &&
-       "${QBT_LOGIN_COOKIE_PRESENT}" -eq 1 ]]
-}
-
-reset_qbittorrent_webui_auth() {
-    local backup_file=""
-
-    echo
-    echo "Resetting qBittorrent Web UI authentication and requesting a new temporary password..."
-
-    systemctl stop "${QBT_SERVICE_NAME}.service" 2>/dev/null || true
-    docker rm -f "${QBT_CONTAINER_NAME}" >/dev/null 2>&1 || true
-
-    if [[ -f "${QBT_DOCKER_CONFIG_FILE}" ]]; then
-        backup_file="${QBT_DOCKER_CONFIG_FILE}.auth-backup.$(date +%Y%m%d-%H%M%S)"
-        cp -a "${QBT_DOCKER_CONFIG_FILE}" "${backup_file}"
-
-        sed -i -E \
-            '/^WebUI\\(Password_PBKDF2|Password_ha1|Password|Username)=/d' \
-            "${QBT_DOCKER_CONFIG_FILE}"
-    fi
-
-    systemctl restart "${QBT_SERVICE_NAME}.service"
-    wait_for_qbittorrent_webui
-}
-
-backup_existing_native_service() {
-    local backup_file=""
-
-    if [[ ! -f "${QBT_SERVICE_FILE}" ]]; then
-        return
-    fi
-
-    if grep -Fq "${QBT_IMAGE}" "${QBT_SERVICE_FILE}" 2>/dev/null; then
-        return
-    fi
-
-    backup_file="${QBT_SERVICE_FILE}.native-backup.$(date +%Y%m%d-%H%M%S)"
-    cp -a "${QBT_SERVICE_FILE}" "${backup_file}"
-
-    echo "Backed up the previous native qBittorrent service:"
-    echo "  ${backup_file}"
-}
-
-migrate_native_qbittorrent_profile() {
-    local migrated=0
-
-    install -d -o root -g root -m 0755 "${BASE_DIR}"
-    install -d -o root -g root -m 0755 "${DOWNLOAD_DIR}"
-    install -d -o root -g root -m 0755 "${INCOMPLETE_DIR}"
-    install -d -o root -g root -m 0700 "${QBT_DOCKER_CONFIG_DIR}"
-    install -d -o root -g root -m 0700 "${QBT_DOCKER_QBT_CONFIG_DIR}"
-    install -d -o root -g root -m 0700 "${QBT_DOCKER_QBT_DATA_DIR}"
-
-    if [[ ! -f "${QBT_DOCKER_CONFIG_FILE}" &&
-          -d "${QBT_CONFIG_DIR}" ]]; then
-        echo >&2
-        echo "Migrating the existing native qBittorrent configuration..." >&2
-
-        cp -a "${QBT_CONFIG_DIR}/." "${QBT_DOCKER_QBT_CONFIG_DIR}/"
-        migrated=1
-    fi
-
-    if [[ -d "${QBT_NATIVE_DATA_DIR}" ]] &&
-       [[ -z "$(find "${QBT_DOCKER_QBT_DATA_DIR}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "Migrating existing torrent state and resume data..." >&2
-
-        cp -a "${QBT_NATIVE_DATA_DIR}/." "${QBT_DOCKER_QBT_DATA_DIR}/"
-        migrated=1
-    fi
-
-    if [[ "${migrated}" -eq 1 && -f "${QBT_DOCKER_CONFIG_FILE}" ]]; then
-        cp -a \
-            "${QBT_DOCKER_CONFIG_FILE}" \
-            "${QBT_DOCKER_CONFIG_FILE}.before-docker.$(date +%Y%m%d-%H%M%S)"
-
-        sed -i -E \
-            '/^WebUI\\(Password_PBKDF2|Password_ha1|Password|Username)=/d' \
-            "${QBT_DOCKER_CONFIG_FILE}"
-    fi
-
-    printf '%s' "${migrated}"
-}
-
-write_qbittorrent_docker_service() {
-    # The official image runs qBittorrent as UID/GID 1000 by default.
-    # Keep persistent configuration and download files writable by it.
-    chown -R 1000:1000         "${QBT_DOCKER_CONFIG_DIR}"         "${DOWNLOAD_DIR}"         "${INCOMPLETE_DIR}"
-
-    chmod 0755 "${DOWNLOAD_DIR}" "${INCOMPLETE_DIR}"
-
-    cat > "${QBT_SERVICE_FILE}" <<EOF
-[Unit]
-Description=Official qBittorrent-nox Docker Service
-Documentation=https://github.com/qbittorrent/docker-qbittorrent-nox
-Wants=network-online.target docker.service
-After=network-online.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=root
-Group=root
-Restart=always
-RestartSec=5
-TimeoutStartSec=0
-TimeoutStopSec=1810
-
-ExecStartPre=-/usr/bin/docker rm -f ${QBT_CONTAINER_NAME}
-ExecStart=/usr/bin/docker run -t --name ${QBT_CONTAINER_NAME} --read-only --stop-timeout 1800 --tmpfs /tmp -e QBT_LEGAL_NOTICE=confirm -e QBT_TORRENTING_PORT=${TORRENT_PORT} -e QBT_WEBUI_PORT=${WEBUI_PORT} -e UMASK=022 -p ${TORRENT_PORT}:${TORRENT_PORT}/tcp -p ${TORRENT_PORT}:${TORRENT_PORT}/udp -p ${WEBUI_PORT}:${WEBUI_PORT}/tcp -v ${QBT_DOCKER_CONFIG_DIR}:/config -v ${DOWNLOAD_DIR}:/downloads -v ${INCOMPLETE_DIR}:/downloads/incomplete -v ${DOWNLOAD_DIR}:${DOWNLOAD_DIR} -v ${INCOMPLETE_DIR}:${INCOMPLETE_DIR} ${QBT_IMAGE}
-ExecStop=/usr/bin/docker stop -t 1800 ${QBT_CONTAINER_NAME}
-
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    chmod 0644 "${QBT_SERVICE_FILE}"
-    systemctl daemon-reload
-    systemctl enable "${QBT_SERVICE_NAME}.service"
-}
-
-configure_qbittorrent_via_api() {
-    local initial_password=""
-    local preferences_json=""
-    local settings_status=""
-    local login_attempt=1
-
-    if [[ -z "${WEBUI_PASSWORD}" ]]; then
-        WEBUI_PASSWORD="$(openssl rand -hex 18)"
-    fi
-
-    COOKIE_FILE="$(mktemp)"
-
-    while (( login_attempt <= 2 )); do
-        initial_password="$(get_initial_qbittorrent_password)"
-
-        if [[ -z "${initial_password}" ]]; then
-            if (( login_attempt == 1 )); then
-                reset_qbittorrent_webui_auth
-                login_attempt=$((login_attempt + 1))
-                continue
+            if [[ -d /etc/nginx ]]; then
+                tar -czf \
+                    "/root/torrent-to-direct-download-backups/host-nginx.${BACKUP_STAMP}.tar.gz" \
+                    -C /etc nginx
             fi
 
-            echo "The temporary qBittorrent Web UI password could not be found."
-            docker logs --tail 150 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
-            exit 1
+            systemctl disable --now nginx.service 2>/dev/null || true
+            printf 'Disabled the host Nginx service; its configuration was backed up.\n'
         fi
-
-        if qbt_api_login "${WEBUI_USER}" "${initial_password}"; then
-            break
-        fi
-
-        if (( login_attempt == 1 )); then
-            echo
-            echo "The first Web UI login attempt failed."
-            echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
-            echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
-            echo "A fresh temporary password will be generated automatically."
-
-            reset_qbittorrent_webui_auth
-            login_attempt=$((login_attempt + 1))
-            continue
-        fi
-
-        echo
-        echo "Initial qBittorrent API login failed after automatic recovery."
-        echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
-        echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
-        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
-        echo "Username: ${WEBUI_USER}"
-        echo
-        echo "Current container logs:"
-        docker logs --tail 150 "${QBT_CONTAINER_NAME}" 2>/dev/null || true
-        exit 1
-    done
-
-    preferences_json="$(
-        jq -n \
-            --arg webui_address "*" \
-            --arg webui_username "${WEBUI_USER}" \
-            --arg webui_password "${WEBUI_PASSWORD}" \
-            --arg save_path "/downloads" \
-            --arg temp_path "/downloads/incomplete" \
-            --argjson webui_port "${WEBUI_PORT}" \
-            --argjson torrent_port "${TORRENT_PORT}" \
-            '{
-                web_ui_address: $webui_address,
-                web_ui_port: $webui_port,
-                web_ui_username: $webui_username,
-                web_ui_password: $webui_password,
-                web_ui_domain_list: "*",
-                save_path: $save_path,
-                temp_path_enabled: true,
-                temp_path: $temp_path,
-                listen_port: $torrent_port,
-                random_port: false,
-                dht: true,
-                pex: true,
-                lsd: true,
-                upnp: true
-            }'
-    )"
-
-    settings_status="$(
-        curl \
-            --silent \
-            --show-error \
-            --cookie "${COOKIE_FILE}" \
-            --resolve "localhost:${WEBUI_PORT}:127.0.0.1" \
-            -H "Referer: http://localhost:${WEBUI_PORT}" \
-            -H "Origin: http://localhost:${WEBUI_PORT}" \
-            --output /dev/null \
-            --write-out "%{http_code}" \
-            --data-urlencode "json=${preferences_json}" \
-            "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences"
-    )"
-
-    if [[ "${settings_status}" != "200" ]]; then
-        echo "Saving qBittorrent preferences failed."
-        echo "HTTP status: ${settings_status}"
-        exit 1
     fi
 
-    rm -f "${COOKIE_FILE}"
-    COOKIE_FILE="$(mktemp)"
+    pkill -TERM -x qbittorrent-nox 2>/dev/null || true
     sleep 1
+    pkill -KILL -x qbittorrent-nox 2>/dev/null || true
 
-    if ! qbt_api_login "${WEBUI_USER}" "${WEBUI_PASSWORD}"; then
-        echo
-        echo "The permanent Web UI password was saved but could not be verified."
-        echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
-        echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
-        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
-        exit 1
-    fi
-
-    QBT_DISPLAY_USER="${WEBUI_USER}"
-    QBT_DISPLAY_PASSWORD="${WEBUI_PASSWORD}"
-
-    cat > "${QBT_CREDENTIAL_FILE}" <<EOF
-qBittorrent Web UI Credentials
-========================================
-
-URL: http://${PUBLIC_IP}:${WEBUI_PORT}
-Local URL: http://127.0.0.1:${WEBUI_PORT}
-
-Username: ${WEBUI_USER}
-Password: ${WEBUI_PASSWORD}
-
-Deployment: Official Docker image
-Image: ${QBT_IMAGE}
-Service: ${QBT_SERVICE_NAME}.service
-qBittorrent Version: ${QBT_VERSION}
-
-Download Directory:
-${DOWNLOAD_DIR}
-
-Incomplete Download Directory:
-${INCOMPLETE_DIR}
-
-Torrent Port:
-${TORRENT_PORT}/TCP
-${TORRENT_PORT}/UDP
-EOF
-
-    chmod 0600 "${QBT_CREDENTIAL_FILE}"
+    systemctl daemon-reload
 }
 
-ensure_latest_qbittorrent() {
-    local migrated=0
-    local service_is_official=0
-    local container_is_running=0
-    local needs_recreate=1
-    local profile_was_present=0
+stop_previous_containers() {
+    log "Stopping previous qBittorrent/Nginx containers from earlier installer versions."
 
-    if [[ -f "${QBT_DOCKER_CONFIG_FILE}" ]]; then
-        profile_was_present=1
+    if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
+        compose down --remove-orphans 2>/dev/null || true
     fi
 
-    echo
-    echo "Pulling the latest stable official qBittorrent image..."
-    docker pull "${QBT_IMAGE}"
+    local container
+    for container in \
+        qbittorrent-nox \
+        "${QBT_CONTAINER}" \
+        "${NGINX_CONTAINER}" \
+        "${CERTBOT_RENEW_CONTAINER}"; do
 
-    QBT_IMAGE_ID="$(
-        docker image inspect \
-            --format '{{.Id}}' \
-            "${QBT_IMAGE}"
+        if docker container inspect "${container}" >/dev/null 2>&1; then
+            docker rm -f "${container}" >/dev/null
+        fi
+    done
+}
+
+check_port_is_free() {
+    local port="$1"
+    local description="$2"
+    local listeners=""
+
+    listeners="$(
+        ss -H -lntp 2>/dev/null \
+            | awk -v p=":${port}" '$4 ~ (p "$") {print}' \
+            || true
     )"
 
-    if [[ -f "${QBT_SERVICE_FILE}" ]] &&
-       grep -Fq "${QBT_IMAGE}" "${QBT_SERVICE_FILE}"; then
-        service_is_official=1
-    fi
+    [[ -z "${listeners}" ]] || {
+        printf '\nPort %s is already in use:\n%s\n' "${port}" "${listeners}" >&2
+        die "${description} requires TCP port ${port}."
+    }
+}
 
-    if docker inspect "${QBT_CONTAINER_NAME}" >/dev/null 2>&1 &&
-       [[ "$(docker inspect --format '{{.State.Running}}' "${QBT_CONTAINER_NAME}")" == "true" ]]; then
-        container_is_running=1
-        QBT_CONTAINER_IMAGE_ID="$(
-            docker inspect \
-                --format '{{.Image}}' \
-                "${QBT_CONTAINER_NAME}"
-        )"
-    fi
+check_udp_port_is_free() {
+    local port="$1"
+    local description="$2"
+    local listeners=""
 
-    if [[ "${service_is_official}" -eq 1 &&
-          "${container_is_running}" -eq 1 &&
-          "${QBT_CONTAINER_IMAGE_ID}" == "${QBT_IMAGE_ID}" ]]; then
-        needs_recreate=0
-    fi
+    listeners="$(
+        ss -H -lunp 2>/dev/null \
+            | awk -v p=":${port}" '$5 ~ (p "$") || $4 ~ (p "$") {print}' \
+            || true
+    )"
 
-    if [[ "${needs_recreate}" -eq 0 ]]; then
-        QBT_ACTION="reused official latest image"
-        wait_for_qbittorrent_webui
-        QBT_VERSION="$(get_qbittorrent_version)"
+    [[ -z "${listeners}" ]] || {
+        printf '\nUDP port %s is already in use:\n%s\n' "${port}" "${listeners}" >&2
+        die "${description} requires UDP port ${port}."
+    }
+}
 
-        # A previous installer run may have created the container but failed
-        # before saving Docker-specific credentials. Complete that interrupted
-        # setup automatically instead of skipping authentication setup.
-        if [[ ! -f "${QBT_CREDENTIAL_FILE}" ]] ||
-           ! grep -Fq "Deployment: Official Docker image" "${QBT_CREDENTIAL_FILE}"; then
-            configure_qbittorrent_via_api
-            systemctl restart "${QBT_SERVICE_NAME}.service"
-            wait_for_qbittorrent_webui
-        fi
-
-        read_existing_qbittorrent_credentials
+configure_ufw_if_active() {
+    if ! command -v ufw >/dev/null 2>&1; then
         return
     fi
 
-    echo
-    echo "Installing or upgrading qBittorrent to the official latest image..."
-
-    systemctl stop "${QBT_SERVICE_NAME}.service" 2>/dev/null || true
-    pkill -TERM -x qbittorrent-nox 2>/dev/null || true
-    sleep 2
-    pkill -KILL -x qbittorrent-nox 2>/dev/null || true
-    docker rm -f "${QBT_CONTAINER_NAME}" >/dev/null 2>&1 || true
-
-    backup_existing_native_service
-    migrated="$(migrate_native_qbittorrent_profile)"
-
-    write_qbittorrent_docker_service
-    systemctl restart "${QBT_SERVICE_NAME}.service"
-
-    wait_for_qbittorrent_webui
-    QBT_VERSION="$(get_qbittorrent_version)"
-
-    if [[ "${migrated}" -eq 1 ||
-          "${profile_was_present}" -eq 0 ||
-          ! -f "${QBT_CREDENTIAL_FILE}" ]]; then
-        configure_qbittorrent_via_api
-        systemctl restart "${QBT_SERVICE_NAME}.service"
-        wait_for_qbittorrent_webui
-    else
-        read_existing_qbittorrent_credentials
+    if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+        return
     fi
 
-    if [[ "${migrated}" -eq 1 ]]; then
-        QBT_ACTION="migrated to official latest Docker image"
-    elif [[ "${container_is_running}" -eq 1 ]]; then
-        QBT_ACTION="upgraded official Docker image"
-    else
-        QBT_ACTION="installed official latest Docker image"
-    fi
-}
+    log "Opening the required ports in the active UFW firewall."
 
-install_certbot_snap() {
-    local parsed_version=""
-
-    echo
-    echo "Installing or updating the official Certbot Snap..."
-
-    systemctl enable --now snapd.socket
-
-    if systemctl list-unit-files 2>/dev/null |
-        grep -q '^snapd.service'; then
-        systemctl start snapd.service || true
-    fi
-
-    timeout 180 snap wait system seed.loaded >/dev/null 2>&1 || true
-
-    if ! snap list core >/dev/null 2>&1; then
-        snap install core
-    else
-        snap refresh core >/dev/null 2>&1 || true
-    fi
-
-    if ! snap list certbot >/dev/null 2>&1; then
-        snap install --classic certbot
-    else
-        snap refresh certbot >/dev/null 2>&1 || true
-    fi
-
-    if [[ ! -x "${CERTBOT_BIN}" ]]; then
-        echo "The Certbot Snap executable was not found:"
-        echo "  ${CERTBOT_BIN}"
-        exit 1
-    fi
-
-    CERTBOT_VERSION="$(
-        "${CERTBOT_BIN}" --version 2>/dev/null |
-        grep -oE '[0-9]+(\.[0-9]+){1,3}' |
-        head -n 1 ||
-        true
-    )"
-
-    if [[ -z "${CERTBOT_VERSION}" ]]; then
-        echo "The installed Certbot version could not be detected."
-        exit 1
-    fi
-
-    parsed_version="${CERTBOT_VERSION}"
-
-    if ! dpkg --compare-versions "${parsed_version}" ge "5.4"; then
-        echo "Certbot 5.4 or newer is required for IP certificates with webroot."
-        echo "Installed version: ${CERTBOT_VERSION}"
-        exit 1
-    fi
-
-    echo "Certbot version: ${CERTBOT_VERSION}"
+    ufw allow 80/tcp >/dev/null
+    ufw allow 443/tcp >/dev/null
+    ufw allow "${WEBUI_PORT}/tcp" >/dev/null
+    ufw allow "${TORRENT_PORT}/tcp" >/dev/null
+    ufw allow "${TORRENT_PORT}/udp" >/dev/null
 }
 
 prepare_directories() {
-    install -d -o root -g root -m 0755 "${BASE_DIR}"
-    install -d -o root -g root -m 0755 "${DOWNLOAD_DIR}"
-    install -d -o root -g root -m 0755 "${INCOMPLETE_DIR}"
-    install -d -o root -g root -m 0755 "${ACME_WEBROOT}"
-    install -d -o root -g root -m 0755 \
-        "${ACME_WEBROOT}/.well-known/acme-challenge"
+    log "Preparing persistent data and stack directories."
 
-    chmod 0755 "${BASE_DIR}" 2>/dev/null || true
-    chmod 0755 "${DOWNLOAD_DIR}"
-    chmod 0755 "${ACME_WEBROOT}"
+    install -d -m 0755 "${STACK_DIR}"
+    install -d -m 0755 "${NGINX_CONF_DIR}"
+    install -d -m 0755 "${NGINX_ENTRYPOINT_DIR}"
+
+    install -d -m 0755 "${DATA_DIR}"
+    install -d -m 0755 "${QBT_CONFIG_DIR}"
+    install -d -m 0755 "${DOWNLOAD_DIR}"
+    install -d -m 0755 "${INCOMPLETE_DIR}"
+    install -d -m 0755 "${LETSENCRYPT_DIR}"
+    install -d -m 0755 "${ACME_DIR}/.well-known/acme-challenge"
+
+    install -d -m 0755 "$(dirname "${QBT_CONFIG_FILE}")"
+    install -d -m 0755 "${QBT_DATA_DIR}"
 }
 
-write_nginx_common_server_body() {
-    cat <<EOF
-    server_name ${PUBLIC_IP};
+migrate_previous_data() {
+    log "Checking for data from previous native installations."
 
-    root "${DOWNLOAD_DIR}";
+    if [[ ! -s "${QBT_CONFIG_FILE}" \
+          && -s /root/.config/qBittorrent/qBittorrent.conf ]]; then
+        cp -a \
+            /root/.config/qBittorrent/qBittorrent.conf \
+            "${QBT_CONFIG_FILE}"
+        printf 'Migrated native qBittorrent configuration.\n'
+    fi
+
+    if [[ -d /root/.local/share/qBittorrent \
+          && -z "$(find "${QBT_DATA_DIR}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        cp -a /root/.local/share/qBittorrent/. "${QBT_DATA_DIR}/"
+        printf 'Migrated native torrent state and resume data.\n'
+    fi
+
+}
+
+read_existing_password() {
+    local existing=""
+
+    if [[ "${RESET_QBT_PASSWORD}" == "1" ]]; then
+        return
+    fi
+
+    if [[ -r "${CREDENTIAL_FILE}" ]]; then
+        existing="$(
+            awk -F': ' '/^Password: / {print $2; exit}' \
+                "${CREDENTIAL_FILE}" \
+                || true
+        )"
+    fi
+
+    if [[ -n "${existing}" \
+          && "${existing}" != "unchanged" \
+          && "${existing}" != "temporary" ]]; then
+        QBT_PASSWORD="${existing}"
+    fi
+}
+
+generate_qbittorrent_password_hash() {
+    local password="$1"
+
+    python3 - "${password}" <<'PY'
+import base64
+import hashlib
+import os
+import sys
+
+password = sys.argv[1].encode("utf-8")
+
+# Verify the implementation against qBittorrent's known adminadmin vector.
+known_salt = base64.b64decode("ARQ77eY1NUZaQsuDHbIMCA==")
+known_expected = base64.b64decode(
+    "0WMRkYTUWVT9wVvdDtHAjU9b3b7uB8NR1Gur2hmQCvCDpm39Q+PsJRJPaCU51dEiz+dTzh8qbPsL8WkFljQYFQ=="
+)
+known_actual = hashlib.pbkdf2_hmac(
+    "sha512", b"adminadmin", known_salt, 100000
+)
+if known_actual != known_expected:
+    raise SystemExit("PBKDF2 self-test failed")
+
+salt = os.urandom(16)
+derived = hashlib.pbkdf2_hmac("sha512", password, salt, 100000)
+
+print(
+    "@ByteArray("
+    + base64.b64encode(salt).decode("ascii")
+    + ":"
+    + base64.b64encode(derived).decode("ascii")
+    + ")"
+)
+PY
+}
+
+configure_qbittorrent_offline() {
+    local password_hash=""
+
+    log "Creating a deterministic qBittorrent WebUI login without using its Web API."
+
+    read_existing_password
+
+    if [[ -z "${QBT_PASSWORD}" ]]; then
+        QBT_PASSWORD="$(openssl rand -hex 18)"
+    fi
+
+    (( ${#QBT_PASSWORD} >= 12 )) \
+        || die "QBT_PASSWORD must contain at least 12 characters."
+
+    password_hash="$(generate_qbittorrent_password_hash "${QBT_PASSWORD}")"
+
+    if [[ -s "${QBT_CONFIG_FILE}" ]]; then
+        cp -a \
+            "${QBT_CONFIG_FILE}" \
+            "${QBT_CONFIG_FILE}.backup.${BACKUP_STAMP}"
+    fi
+
+    python3 - \
+        "${QBT_CONFIG_FILE}" \
+        "${QBT_USERNAME}" \
+        "${password_hash}" \
+        "${WEBUI_PORT}" \
+        "${TORRENT_PORT}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+username = sys.argv[2]
+password_hash = sys.argv[3]
+webui_port = sys.argv[4]
+torrent_port = sys.argv[5]
+
+text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+lines = text.splitlines()
+
+def set_value(section: str, key: str, value: str) -> None:
+    global lines
+
+    section_header = f"[{section}]"
+    start = None
+    end = len(lines)
+
+    for index, line in enumerate(lines):
+        if line.strip() == section_header:
+            start = index
+            break
+
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([section_header, f"{key}={value}"])
+        return
+
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("[") and lines[index].endswith("]"):
+            end = index
+            break
+
+    prefix = f"{key}="
+    for index in range(start + 1, end):
+        if lines[index].startswith(prefix):
+            lines[index] = f"{key}={value}"
+            return
+
+    lines.insert(end, f"{key}={value}")
+
+set_value("LegalNotice", "Accepted", "true")
+
+set_value("BitTorrent", r"Session\DefaultSavePath", "/downloads")
+set_value("BitTorrent", r"Session\TempPath", "/incomplete")
+set_value("BitTorrent", r"Session\TempPathEnabled", "true")
+set_value("BitTorrent", r"Session\Port", torrent_port)
+set_value("BitTorrent", r"Session\QueueingSystemEnabled", "false")
+
+# Compatibility keys retained for installations migrated from older releases.
+set_value("Preferences", r"Downloads\SavePath", "/downloads/")
+set_value("Preferences", r"Downloads\TempPath", "/incomplete/")
+set_value("Preferences", r"Downloads\TempPathEnabled", "true")
+
+set_value("Preferences", r"WebUI\Address", "*")
+set_value("Preferences", r"WebUI\Port", webui_port)
+set_value("Preferences", r"WebUI\Username", username)
+set_value(
+    "Preferences",
+    r"WebUI\Password_PBKDF2",
+    f'"{password_hash}"',
+)
+set_value("Preferences", r"WebUI\LocalHostAuth", "true")
+set_value("Preferences", r"WebUI\AuthSubnetWhitelistEnabled", "false")
+set_value("Preferences", r"WebUI\AuthSubnetWhitelist", "@Invalid()")
+set_value("Preferences", r"WebUI\HostHeaderValidation", "false")
+set_value("Preferences", r"WebUI\CSRFProtection", "true")
+set_value("Preferences", r"WebUI\ClickjackingProtection", "true")
+set_value("Preferences", r"WebUI\SecureCookie", "false")
+set_value("Preferences", r"WebUI\ServerDomains", "*")
+set_value("Preferences", r"WebUI\UseUPnP", "false")
+
+path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+
+    chown -R 1000:1000 \
+        "${QBT_CONFIG_DIR}" \
+        "${DOWNLOAD_DIR}" \
+        "${INCOMPLETE_DIR}"
+
+    chmod -R a+rX "${DOWNLOAD_DIR}" "${INCOMPLETE_DIR}"
+
+    cat > "${CREDENTIAL_FILE}" <<EOF
+qBittorrent WebUI Credentials
+==============================
+
+URL: http://${PUBLIC_IP}:${WEBUI_PORT}
+Username: ${QBT_USERNAME}
+Password: ${QBT_PASSWORD}
+
+Deployment: Docker Compose
+Container: ${QBT_CONTAINER}
+Image: ${QBT_IMAGE}
+EOF
+
+    chmod 0600 "${CREDENTIAL_FILE}"
+}
+
+write_environment_file() {
+    cat > "${ENV_FILE}" <<EOF
+QBT_IMAGE=${QBT_IMAGE}
+NGINX_IMAGE=${NGINX_IMAGE}
+CERTBOT_IMAGE=${CERTBOT_IMAGE}
+
+QBT_CONFIG_DIR=${QBT_CONFIG_DIR}
+DOWNLOAD_DIR=${DOWNLOAD_DIR}
+INCOMPLETE_DIR=${INCOMPLETE_DIR}
+LETSENCRYPT_DIR=${LETSENCRYPT_DIR}
+ACME_DIR=${ACME_DIR}
+NGINX_CONF_DIR=${NGINX_CONF_DIR}
+NGINX_ENTRYPOINT_DIR=${NGINX_ENTRYPOINT_DIR}
+
+WEBUI_BIND=${WEBUI_BIND}
+WEBUI_PORT=${WEBUI_PORT}
+TORRENT_PORT=${TORRENT_PORT}
+TIMEZONE=${TIMEZONE}
+EOF
+
+    chmod 0600 "${ENV_FILE}"
+}
+
+write_compose_file() {
+    cat > "${COMPOSE_FILE}" <<'YAML'
+name: torrent-to-direct-download
+
+services:
+  qbittorrent:
+    image: ${QBT_IMAGE}
+    container_name: ttdd-qbittorrent
+    restart: unless-stopped
+    read_only: true
+    tty: true
+    stop_grace_period: 30m
+    tmpfs:
+      - /tmp
+    environment:
+      QBT_LEGAL_NOTICE: confirm
+      QBT_TORRENTING_PORT: ${TORRENT_PORT}
+      QBT_WEBUI_PORT: ${WEBUI_PORT}
+      TZ: ${TIMEZONE}
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+    ports:
+      - "${WEBUI_BIND}:${WEBUI_PORT}:${WEBUI_PORT}/tcp"
+      - "0.0.0.0:${TORRENT_PORT}:${TORRENT_PORT}/tcp"
+      - "0.0.0.0:${TORRENT_PORT}:${TORRENT_PORT}/udp"
+    volumes:
+      - "${QBT_CONFIG_DIR}:/config"
+      - "${DOWNLOAD_DIR}:/downloads"
+      - "${INCOMPLETE_DIR}:/incomplete"
+      # Preserve resumed torrents migrated from the former native setup.
+      - "${DOWNLOAD_DIR}:${DOWNLOAD_DIR}"
+      - "${INCOMPLETE_DIR}:${INCOMPLETE_DIR}"
+
+  nginx:
+    image: ${NGINX_IMAGE}
+    container_name: ttdd-nginx
+    restart: unless-stopped
+    environment:
+      CERT_RELOAD_INTERVAL: "60"
+    ports:
+      - "0.0.0.0:80:80/tcp"
+      - "0.0.0.0:443:443/tcp"
+    volumes:
+      - "${DOWNLOAD_DIR}:/downloads:ro"
+      - "${LETSENCRYPT_DIR}:/etc/letsencrypt:ro"
+      - "${ACME_DIR}:/var/www/certbot"
+      - "${NGINX_CONF_DIR}:/etc/nginx/conf.d:ro"
+      - "${NGINX_ENTRYPOINT_DIR}:/docker-entrypoint.d:ro"
+
+  certbot:
+    image: ${CERTBOT_IMAGE}
+    profiles:
+      - tools
+    volumes:
+      - "${LETSENCRYPT_DIR}:/etc/letsencrypt"
+      - "${ACME_DIR}:/var/www/certbot"
+
+  certbot-renew:
+    image: ${CERTBOT_IMAGE}
+    container_name: ttdd-certbot-renew
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        trap 'exit 0' TERM INT
+        while :; do
+          certbot renew --quiet --deploy-hook 'touch /var/www/certbot/.reload-nginx'
+          sleep 43200
+        done
+    volumes:
+      - "${LETSENCRYPT_DIR}:/etc/letsencrypt"
+      - "${ACME_DIR}:/var/www/certbot"
+YAML
+}
+
+write_nginx_reload_script() {
+    cat > "${NGINX_ENTRYPOINT_DIR}/99-cert-reload.sh" <<'SH'
+#!/bin/sh
+set -eu
+
+interval="${CERT_RELOAD_INTERVAL:-60}"
+
+(
+    while :; do
+        sleep "${interval}"
+
+        if [ -f /var/www/certbot/.reload-nginx ]; then
+            if nginx -t; then
+                nginx -s reload
+                rm -f /var/www/certbot/.reload-nginx
+            fi
+        fi
+    done
+) &
+SH
+
+    chmod 0755 "${NGINX_ENTRYPOINT_DIR}/99-cert-reload.sh"
+}
+
+write_nginx_http_config() {
+    cat > "${NGINX_CONF_DIR}/default.conf" <<'NGINX'
+server {
+    listen 80 default_server;
+    server_name _;
+
+    root /downloads;
     charset utf-8;
 
-    access_log ${NGINX_ACCESS_LOG};
-    error_log ${NGINX_ERROR_LOG};
-
+    server_tokens off;
     sendfile on;
     tcp_nopush on;
 
@@ -1075,7 +797,48 @@ write_nginx_common_server_body() {
     autoindex_localtime on;
 
     location ^~ /.well-known/acme-challenge/ {
-        root "${ACME_WEBROOT}";
+        root /var/www/certbot;
+        default_type text/plain;
+        allow all;
+        try_files $uri =404;
+    }
+
+    location / {
+        limit_except GET HEAD {
+            deny all;
+        }
+
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+
+    add_header X-Content-Type-Options "nosniff" always;
+}
+NGINX
+}
+
+write_nginx_https_config() {
+    cat > "${NGINX_CONF_DIR}/default.conf" <<EOF
+server {
+    listen 80 default_server;
+    server_name _;
+
+    root /downloads;
+    charset utf-8;
+
+    server_tokens off;
+    sendfile on;
+    tcp_nopush on;
+
+    autoindex on;
+    autoindex_exact_size off;
+    autoindex_localtime on;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
         default_type text/plain;
         allow all;
         try_files \$uri =404;
@@ -1094,87 +857,26 @@ write_nginx_common_server_body() {
     }
 
     add_header X-Content-Type-Options "nosniff" always;
-EOF
-}
-
-write_nginx_http_only_config() {
-    local http_listen=""
-
-    if [[ "${BIND_ADDRESS}" == "0.0.0.0" ]]; then
-        http_listen="listen 80;"
-    else
-        http_listen="listen ${BIND_ADDRESS}:80;"
-    fi
-
-    echo
-    echo "Writing the temporary HTTP-only Nginx configuration..."
-
-    {
-        echo "server {"
-        echo "    ${http_listen}"
-        write_nginx_common_server_body
-        echo "}"
-    } > "${NGINX_SITE_AVAILABLE}"
-
-    ln -sfn "${NGINX_SITE_AVAILABLE}" "${NGINX_SITE_ENABLED}"
-
-    nginx -t
-    systemctl enable nginx.service
-    systemctl restart nginx.service
-
-    if ! systemctl is-active --quiet nginx.service; then
-        echo "Nginx failed to start."
-        journalctl -u nginx.service -n 100 --no-pager
-        exit 1
-    fi
-}
-
-write_nginx_https_config() {
-    local http_listen=""
-    local https_listen=""
-
-    if [[ "${BIND_ADDRESS}" == "0.0.0.0" ]]; then
-        http_listen="listen 80;"
-        https_listen="listen 443 ssl http2 default_server;"
-    else
-        http_listen="listen ${BIND_ADDRESS}:80;"
-        https_listen="listen ${BIND_ADDRESS}:443 ssl http2;"
-    fi
-
-    echo
-    echo "Writing the final HTTP and HTTPS Nginx configuration..."
-
-    cat > "${NGINX_SITE_AVAILABLE}" <<EOF
-server {
-    ${http_listen}
-EOF
-
-    write_nginx_common_server_body >> "${NGINX_SITE_AVAILABLE}"
-
-    cat >> "${NGINX_SITE_AVAILABLE}" <<EOF
 }
 
 server {
-    ${https_listen}
-
+    listen 443 ssl default_server;
     server_name ${PUBLIC_IP};
 
-    root "${DOWNLOAD_DIR}";
+    root /downloads;
     charset utf-8;
 
-    access_log ${NGINX_ACCESS_LOG};
-    error_log ${NGINX_ERROR_LOG};
-
-    ssl_certificate "${CERT_FULLCHAIN}";
-    ssl_certificate_key "${CERT_PRIVATE_KEY}";
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_session_cache shared:QBT_SSL:10m;
-    ssl_session_timeout 1d;
-    ssl_session_tickets off;
-
+    server_tokens off;
     sendfile on;
     tcp_nopush on;
+
+    ssl_certificate /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:TTDD_SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
 
     autoindex on;
     autoindex_exact_size off;
@@ -1195,65 +897,168 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
 }
 EOF
-
-    ln -sfn "${NGINX_SITE_AVAILABLE}" "${NGINX_SITE_ENABLED}"
-
-    nginx -t
-    systemctl enable nginx.service
-    systemctl reload nginx.service
-
-    if ! systemctl is-active --quiet nginx.service; then
-        echo "Nginx is not active after applying HTTPS."
-        journalctl -u nginx.service -n 100 --no-pager
-        exit 1
-    fi
 }
 
-configure_ufw_before_certificate() {
-    if ! command -v ufw >/dev/null 2>&1; then
-        UFW_STATUS="Not installed"
-        return
-    fi
+validate_generated_files() {
+    log "Validating the generated shell, Compose, and Nginx configuration."
 
-    if ! ufw status 2>/dev/null | grep -q "^Status: active"; then
-        UFW_STATUS="Inactive"
-        return
-    fi
+    bash -n "$0"
 
-    ufw allow 80/tcp >/dev/null
-    ufw allow 443/tcp >/dev/null
-    ufw allow "${TORRENT_PORT}/tcp" >/dev/null
-    ufw allow "${TORRENT_PORT}/udp" >/dev/null
+    python3 - "${COMPOSE_FILE}" <<'PY'
+import sys
+from pathlib import Path
 
-    UFW_STATUS="Active; TCP 80, TCP 443, and torrent ports were opened"
+try:
+    import yaml
+except ImportError:
+    raise SystemExit("PyYAML is unavailable")
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text())
+
+required = {"qbittorrent", "nginx", "certbot", "certbot-renew"}
+services = set(data.get("services", {}))
+missing = required - services
+if missing:
+    raise SystemExit(f"Missing Compose services: {sorted(missing)}")
+PY
+
+    docker compose \
+        --project-name "${STACK_NAME}" \
+        --env-file "${ENV_FILE}" \
+        --file "${COMPOSE_FILE}" \
+        config --quiet
+
+    compose --profile tools pull
+
+    local certbot_version=""
+    certbot_version="$(
+        compose --profile tools run --rm certbot --version \
+            | grep -oE '[0-9]+(\.[0-9]+){1,3}' \
+            | head -n 1
+    )"
+
+    dpkg --compare-versions "${certbot_version}" ge "5.4" \
+        || die "Certbot ${certbot_version} is too old; 5.4 or newer is required for IP certificates."
+
+    printf 'Certbot version: %s\n' "${certbot_version}"
 }
 
-certificate_files_exist() {
-    [[ -s "${CERT_FULLCHAIN}" && -s "${CERT_PRIVATE_KEY}" ]]
+start_http_stack() {
+    log "Starting qBittorrent and the HTTP-only Nginx container."
+
+    compose up -d qbittorrent nginx
+
+    local attempt
+    for attempt in $(seq 1 90); do
+        if curl -fsS --max-time 2 \
+            "http://127.0.0.1:${WEBUI_PORT}/" \
+            >/dev/null 2>&1; then
+            break
+        fi
+
+        sleep 1
+    done
+
+    curl -fsS --max-time 5 \
+        "http://127.0.0.1:${WEBUI_PORT}/" \
+        >/dev/null \
+        || die "qBittorrent WebUI did not become available."
+
+    printf 'acme-ok\n' > "${ACME_DIR}/.well-known/acme-challenge/installer-test"
+
+    [[ "$(
+        curl -fsS --max-time 5 \
+            -H "Host: ${PUBLIC_IP}" \
+            "http://127.0.0.1/.well-known/acme-challenge/installer-test"
+    )" == "acme-ok" ]] \
+        || die "Nginx ACME webroot test failed."
+
+    rm -f "${ACME_DIR}/.well-known/acme-challenge/installer-test"
 }
 
-certificate_matches_public_ip() {
-    if ! certificate_files_exist; then
-        return 1
-    fi
+verify_qbittorrent_authentication() {
+    log "Testing qBittorrent with both an incorrect and the configured password."
 
-    openssl x509 \
-        -in "${CERT_CERT}" \
-        -noout \
-        -ext subjectAltName 2>/dev/null |
-        grep -Fq "IP Address:${PUBLIC_IP}"
+    local wrong_password=""
+    local wrong_cookie=""
+    local correct_cookie=""
+    local wrong_version_code=""
+    local correct_version_code=""
+    local version_body=""
+
+    wrong_password="$(openssl rand -hex 20)"
+    wrong_cookie="$(mktemp)"
+    correct_cookie="$(mktemp)"
+
+    curl -sS \
+        --cookie-jar "${wrong_cookie}" \
+        -H "Referer: http://127.0.0.1:${WEBUI_PORT}" \
+        -H "Origin: http://127.0.0.1:${WEBUI_PORT}" \
+        --data-urlencode "username=${QBT_USERNAME}" \
+        --data-urlencode "password=${wrong_password}" \
+        "http://127.0.0.1:${WEBUI_PORT}/api/v2/auth/login" \
+        >/dev/null || true
+
+    wrong_version_code="$(
+        curl -sS \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            --cookie "${wrong_cookie}" \
+            "http://127.0.0.1:${WEBUI_PORT}/api/v2/app/version" \
+            || true
+    )"
+
+    rm -f "${wrong_cookie}"
+
+    [[ "${wrong_version_code}" != "200" ]] \
+        || die "qBittorrent accepted an invalid password or authentication bypass is enabled."
+
+    curl -sS \
+        --cookie-jar "${correct_cookie}" \
+        -H "Referer: http://127.0.0.1:${WEBUI_PORT}" \
+        -H "Origin: http://127.0.0.1:${WEBUI_PORT}" \
+        --data-urlencode "username=${QBT_USERNAME}" \
+        --data-urlencode "password=${QBT_PASSWORD}" \
+        "http://127.0.0.1:${WEBUI_PORT}/api/v2/auth/login" \
+        >/dev/null
+
+    version_body="$(mktemp)"
+
+    correct_version_code="$(
+        curl -sS \
+            --output "${version_body}" \
+            --write-out '%{http_code}' \
+            --cookie "${correct_cookie}" \
+            "http://127.0.0.1:${WEBUI_PORT}/api/v2/app/version"
+    )"
+
+    rm -f "${correct_cookie}"
+
+    [[ "${correct_version_code}" == "200" ]] \
+        || {
+            cat "${version_body}" >&2 || true
+            rm -f "${version_body}"
+            die "qBittorrent rejected the configured permanent password."
+        }
+
+    grep -Eq '^v?[0-9]+\.[0-9]+' "${version_body}" \
+        || {
+            cat "${version_body}" >&2 || true
+            rm -f "${version_body}"
+            die "qBittorrent returned an unexpected application version."
+        }
+
+    printf 'Authenticated qBittorrent version: %s\n' \
+        "$(cat "${version_body}")"
+
+    rm -f "${version_body}"
 }
 
-certificate_is_currently_valid() {
-    certificate_files_exist &&
-        openssl x509 \
-            -in "${CERT_CERT}" \
-            -noout \
-            -checkend 3600 >/dev/null 2>&1
-}
+obtain_certificate() {
+    log "Obtaining or reusing a trusted Let's Encrypt certificate for ${PUBLIC_IP}."
 
-obtain_or_reuse_ip_certificate() {
-    local certbot_arguments=(
+    local args=(
         certonly
         --non-interactive
         --agree-tos
@@ -1261,7 +1066,7 @@ obtain_or_reuse_ip_certificate() {
         shortlived
         --webroot
         --webroot-path
-        "${ACME_WEBROOT}"
+        /var/www/certbot
         --ip-address
         "${PUBLIC_IP}"
         --cert-name
@@ -1270,394 +1075,302 @@ obtain_or_reuse_ip_certificate() {
     )
 
     if [[ -n "${LETSENCRYPT_EMAIL}" ]]; then
-        certbot_arguments+=(
-            --email
-            "${LETSENCRYPT_EMAIL}"
-        )
+        args+=(--email "${LETSENCRYPT_EMAIL}")
     else
-        certbot_arguments+=(
-            --register-unsafely-without-email
-        )
+        args+=(--register-unsafely-without-email)
     fi
 
     if [[ "${LETSENCRYPT_STAGING}" == "1" ]]; then
-        certbot_arguments+=(--staging)
-        CERTIFICATE_STATUS="staging certificate"
-    else
-        CERTIFICATE_STATUS="publicly trusted production certificate"
+        args+=(--staging)
     fi
 
-    echo
-    echo "Requesting or reusing the Let's Encrypt IP certificate..."
-    echo "Certificate IP: ${PUBLIC_IP}"
-    echo "Certificate name: ${CERT_NAME}"
+    compose --profile tools run --rm certbot "${args[@]}"
 
-    "${CERTBOT_BIN}" "${certbot_arguments[@]}"
+    [[ -s "${CERT_FULLCHAIN}" && -s "${CERT_PRIVATE_KEY}" ]] \
+        || die "Certbot completed without creating the expected certificate files."
 
-    if ! certificate_files_exist; then
-        echo "Certbot completed, but the certificate files were not found:"
-        echo "  ${CERT_FULLCHAIN}"
-        echo "  ${CERT_PRIVATE_KEY}"
-        exit 1
-    fi
+    openssl x509 \
+        -in "${CERT_CERT}" \
+        -noout \
+        -ext subjectAltName \
+        | grep -Fq "IP Address:${PUBLIC_IP}" \
+        || die "The issued certificate does not contain ${PUBLIC_IP} in its SAN."
 
-    if ! certificate_matches_public_ip; then
-        echo "The issued certificate does not contain the expected IP SAN:"
-        echo "  ${PUBLIC_IP}"
-        exit 1
-    fi
+    openssl x509 \
+        -in "${CERT_CERT}" \
+        -noout \
+        -checkend 3600 \
+        || die "The issued certificate is not currently valid."
 
-    if ! certificate_is_currently_valid; then
-        echo "The issued certificate is not currently valid."
-        exit 1
+    if [[ "${LETSENCRYPT_STAGING}" == "0" ]]; then
+        openssl verify \
+            -CAfile /etc/ssl/certs/ca-certificates.crt \
+            -untrusted "${CERT_CHAIN}" \
+            "${CERT_CERT}"
     fi
 }
 
-verify_certificate_chain() {
-    if [[ "${LETSENCRYPT_STAGING}" == "1" ]]; then
-        echo
-        echo "Skipping public trust verification because staging mode is enabled."
-        return
-    fi
+enable_https_and_renewal() {
+    log "Enabling HTTPS and the Certbot renewal container."
 
-    echo
-    echo "Verifying the certificate chain against the Ubuntu trust store..."
+    write_nginx_https_config
 
-    openssl verify \
-        -CAfile /etc/ssl/certs/ca-certificates.crt \
-        -untrusted "${CERT_CHAIN}" \
-        "${CERT_CERT}"
-}
+    compose exec -T nginx nginx -t
+    compose restart nginx
 
-configure_automatic_renewal() {
-    install -d -o root -g root -m 0755 "${LETSENCRYPT_HOOK_DIR}"
+    local attempt
+    for attempt in $(seq 1 60); do
+        if [[ "${LETSENCRYPT_STAGING}" == "1" ]]; then
+            if curl -kfsS --max-time 3 \
+                --resolve "${PUBLIC_IP}:443:127.0.0.1" \
+                "https://${PUBLIC_IP}/" \
+                >/dev/null 2>&1; then
+                break
+            fi
+        else
+            if curl -fsS --max-time 3 \
+                --resolve "${PUBLIC_IP}:443:127.0.0.1" \
+                "https://${PUBLIC_IP}/" \
+                >/dev/null 2>&1; then
+                break
+            fi
+        fi
 
-    cat > "${LETSENCRYPT_RELOAD_HOOK}" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-/usr/sbin/nginx -t
-/usr/bin/systemctl reload nginx.service
-EOF
-
-    chmod 0755 "${LETSENCRYPT_RELOAD_HOOK}"
-
-    if systemctl list-unit-files 2>/dev/null |
-        grep -q '^snap\.certbot\.renew\.timer'; then
-
-        systemctl enable --now snap.certbot.renew.timer
-        RENEWAL_SCHEDULER="snap.certbot.renew.timer"
-        return
-    fi
-
-    cat > "${FALLBACK_RENEW_SERVICE}" <<EOF
-[Unit]
-Description=Renew Let's Encrypt IP certificate for qBittorrent downloads
-After=network-online.target nginx.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${CERTBOT_BIN} renew --quiet
-EOF
-
-    cat > "${FALLBACK_RENEW_TIMER}" <<'EOF'
-[Unit]
-Description=Run qBittorrent IP certificate renewal twice daily
-
-[Timer]
-OnCalendar=*-*-* 00,12:17:00
-RandomizedDelaySec=30m
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    chmod 0644 "${FALLBACK_RENEW_SERVICE}" "${FALLBACK_RENEW_TIMER}"
-
-    systemctl daemon-reload
-    systemctl enable --now qbittorrent-ip-cert-renew.timer
-
-    RENEWAL_SCHEDULER="qbittorrent-ip-cert-renew.timer"
-}
-
-verify_http_and_https_locally() {
-    local test_connect_address="127.0.0.1"
-
-    if [[ "${BIND_ADDRESS}" != "0.0.0.0" ]]; then
-        test_connect_address="${BIND_ADDRESS}"
-    fi
-
-    echo
-    echo "Testing the HTTP endpoint locally..."
-
-    curl \
-        --silent \
-        --show-error \
-        --fail \
-        --max-time 10 \
-        -H "Host: ${PUBLIC_IP}" \
-        "http://${test_connect_address}/" \
-        >/dev/null
-
-    echo "HTTP local test passed."
+        sleep 1
+    done
 
     if [[ "${LETSENCRYPT_STAGING}" == "1" ]]; then
-        echo
-        echo "Testing the HTTPS endpoint with staging trust verification disabled..."
-
-        curl \
-            --insecure \
-            --silent \
-            --show-error \
-            --fail \
-            --max-time 10 \
-            --connect-to "${PUBLIC_IP}:443:${test_connect_address}:443" \
+        curl -kfsS --max-time 5 \
+            --resolve "${PUBLIC_IP}:443:127.0.0.1" \
             "https://${PUBLIC_IP}/" \
             >/dev/null
     else
-        echo
-        echo "Testing the trusted HTTPS endpoint locally..."
-
-        curl \
-            --silent \
-            --show-error \
-            --fail \
-            --max-time 10 \
-            --connect-to "${PUBLIC_IP}:443:${test_connect_address}:443" \
+        curl -fsS --max-time 5 \
+            --resolve "${PUBLIC_IP}:443:127.0.0.1" \
             "https://${PUBLIC_IP}/" \
             >/dev/null
     fi
 
-    echo "HTTPS local test passed."
+    compose up -d certbot-renew
+
+    if [[ "${RUN_RENEWAL_DRY_RUN}" == "1" ]]; then
+        log "Running a complete Certbot renewal dry-run."
+        compose --profile tools run --rm certbot \
+            renew \
+            --dry-run
+    fi
+}
+
+verify_direct_downloads() {
+    log "Testing a file download over both HTTP and HTTPS."
+
+    local test_file="${DOWNLOAD_DIR}/ttdd-install-test.txt"
+    local expected="torrent-to-direct-download-ok"
+
+    printf '%s\n' "${expected}" > "${test_file}"
+    chown 1000:1000 "${test_file}"
+    chmod 0644 "${test_file}"
+
+    [[ "$(
+        curl -fsS --max-time 5 \
+            -H "Host: ${PUBLIC_IP}" \
+            "http://127.0.0.1/ttdd-install-test.txt"
+    )" == "${expected}" ]] \
+        || die "HTTP direct-download test failed."
+
+    if [[ "${LETSENCRYPT_STAGING}" == "1" ]]; then
+        [[ "$(
+            curl -kfsS --max-time 5 \
+                --resolve "${PUBLIC_IP}:443:127.0.0.1" \
+                "https://${PUBLIC_IP}/ttdd-install-test.txt"
+        )" == "${expected}" ]] \
+            || die "HTTPS direct-download test failed."
+    else
+        [[ "$(
+            curl -fsS --max-time 5 \
+                --resolve "${PUBLIC_IP}:443:127.0.0.1" \
+                "https://${PUBLIC_IP}/ttdd-install-test.txt"
+        )" == "${expected}" ]] \
+            || die "HTTPS direct-download test failed."
+    fi
+
+    rm -f "${test_file}"
 }
 
 write_information_files() {
     local not_before=""
     local not_after=""
     local fingerprint=""
+    local qbt_version=""
+    local nginx_version=""
+    local certbot_version=""
 
     not_before="$(
-        openssl x509 \
-            -in "${CERT_CERT}" \
-            -noout \
-            -startdate |
-        cut -d= -f2-
+        openssl x509 -in "${CERT_CERT}" -noout -startdate \
+            | cut -d= -f2-
     )"
 
     not_after="$(
-        openssl x509 \
-            -in "${CERT_CERT}" \
-            -noout \
-            -enddate |
-        cut -d= -f2-
+        openssl x509 -in "${CERT_CERT}" -noout -enddate \
+            | cut -d= -f2-
     )"
 
     fingerprint="$(
-        openssl x509 \
-            -in "${CERT_CERT}" \
-            -noout \
-            -fingerprint \
-            -sha256 |
-        cut -d= -f2-
+        openssl x509 -in "${CERT_CERT}" -noout -fingerprint -sha256 \
+            | cut -d= -f2-
+    )"
+
+    qbt_version="$(
+        compose exec -T qbittorrent qbittorrent-nox --version \
+            | tr -d '\r'
+    )"
+
+    nginx_version="$(
+        compose exec -T nginx nginx -v 2>&1 \
+            | tr -d '\r'
+    )"
+
+    certbot_version="$(
+        compose --profile tools run --rm certbot --version \
+            | tr -d '\r'
     )"
 
     cat > "${DOWNLOAD_INFO_FILE}" <<EOF
-qBittorrent Direct Download Information
-========================================
+Direct Download Information
+===========================
 
-HTTP URL:
-http://${PUBLIC_IP}/
+HTTP:  http://${PUBLIC_IP}/
+HTTPS: https://${PUBLIC_IP}/
 
-HTTPS URL:
-https://${PUBLIC_IP}/
-
-Published Directory:
+Published directory:
 ${DOWNLOAD_DIR}
-
-Nginx Site:
-${NGINX_SITE_AVAILABLE}
-
-Nginx Service:
-nginx.service
 
 Authentication:
 None
-
-UFW:
-${UFW_STATUS}
-
-Security Warning:
-Anyone who can reach TCP port 80 or TCP port 443 can list and
-download files from ${DOWNLOAD_DIR}.
 EOF
-
-    chmod 0600 "${DOWNLOAD_INFO_FILE}"
 
     cat > "${SSL_INFO_FILE}" <<EOF
-qBittorrent Let's Encrypt IP SSL Information
-=============================================
+Let's Encrypt IP Certificate
+============================
 
-Certificate IP:
-${PUBLIC_IP}
+IP: ${PUBLIC_IP}
+Certificate name: ${CERT_NAME}
+Not before: ${not_before}
+Not after: ${not_after}
+SHA-256 fingerprint: ${fingerprint}
 
-Certificate Status:
-${CERTIFICATE_STATUS}
-
-Certificate Name:
-${CERT_NAME}
-
-Certificate Directory:
+Certificate directory:
 ${CERT_LIVE_DIR}
 
-Full Chain:
-${CERT_FULLCHAIN}
-
-Private Key:
-${CERT_PRIVATE_KEY}
-
-Not Before:
-${not_before}
-
-Not After:
-${not_after}
-
-SHA-256 Fingerprint:
-${fingerprint}
-
-Certbot Version:
-${CERTBOT_VERSION}
-
-Renewal Scheduler:
-${RENEWAL_SCHEDULER}
-
-Nginx Reload Hook:
-${LETSENCRYPT_RELOAD_HOOK}
-
-HTTP URL:
-http://${PUBLIC_IP}/
-
-HTTPS URL:
-https://${PUBLIC_IP}/
+Renewal container:
+${CERTBOT_RENEW_CONTAINER}
 EOF
 
-    chmod 0600 "${SSL_INFO_FILE}"
+    chmod 0600 \
+        "${DOWNLOAD_INFO_FILE}" \
+        "${SSL_INFO_FILE}"
+
+    printf '\nRuntime versions:\n'
+    printf '  %s\n' "${qbt_version}"
+    printf '  %s\n' "${nginx_version}"
+    printf '  %s\n' "${certbot_version}"
 }
 
 print_summary() {
-    local expiration=""
+    printf '\n============================================================\n'
+    printf 'Installation completed and all verification checks passed.\n'
+    printf 'Installer version: %s\n' "${SCRIPT_VERSION}"
+    printf '============================================================\n\n'
 
-    expiration="$(
-        openssl x509 \
-            -in "${CERT_CERT}" \
-            -noout \
-            -enddate |
-        cut -d= -f2-
-    )"
+    printf 'qBittorrent WebUI:\n'
+    printf '  URL:      http://%s:%s\n' "${PUBLIC_IP}" "${WEBUI_PORT}"
+    printf '  Username: %s\n' "${QBT_USERNAME}"
+    printf '  Password: %s\n\n' "${QBT_PASSWORD}"
 
-    echo
-    echo "================================================================"
-    echo "Installation and SSL configuration completed successfully"
-    echo "================================================================"
-    echo
-    echo "qBittorrent:"
-    echo "  Action: ${QBT_ACTION}"
-    echo "  Version: ${QBT_VERSION}"
-    echo "  Image: ${QBT_IMAGE}"
-    echo "  Service: ${QBT_SERVICE_NAME}.service"
-    echo "  Status: $(systemctl is-active "${QBT_SERVICE_NAME}.service")"
-    echo "  Web UI: http://${PUBLIC_IP}:${WEBUI_PORT}"
+    printf 'Direct downloads:\n'
+    printf '  HTTP:  http://%s/\n' "${PUBLIC_IP}"
+    printf '  HTTPS: https://%s/\n\n' "${PUBLIC_IP}"
 
-    if [[ -n "${QBT_DISPLAY_USER}" ]]; then
-        echo "  Username: ${QBT_DISPLAY_USER}"
-    fi
+    printf 'Persistent data:\n'
+    printf '  Config:     %s\n' "${QBT_CONFIG_DIR}"
+    printf '  Downloads:  %s\n' "${DOWNLOAD_DIR}"
+    printf '  Incomplete: %s\n\n' "${INCOMPLETE_DIR}"
 
-    if [[ -n "${QBT_DISPLAY_PASSWORD}" ]]; then
-        echo "  Password: ${QBT_DISPLAY_PASSWORD}"
-    else
-        echo "  Password: unchanged"
-        echo "  Credentials file: ${QBT_CREDENTIAL_FILE}"
-    fi
+    printf 'Compose stack:\n'
+    printf '  Directory: %s\n' "${STACK_DIR}"
+    printf '  Status:    cd %s && docker compose ps\n\n' "${STACK_DIR}"
 
-    echo
-    echo "Direct downloads:"
-    echo "  HTTP:  http://${PUBLIC_IP}/"
-    echo "  HTTPS: https://${PUBLIC_IP}/"
-    echo "  Directory: ${DOWNLOAD_DIR}"
-    echo "  Authentication: none"
+    printf 'Saved information:\n'
+    printf '  %s\n' "${CREDENTIAL_FILE}"
+    printf '  %s\n' "${DOWNLOAD_INFO_FILE}"
+    printf '  %s\n' "${SSL_INFO_FILE}"
 
-    echo
-    echo "SSL certificate:"
-    echo "  Status: ${CERTIFICATE_STATUS}"
-    echo "  IP SAN: ${PUBLIC_IP}"
-    echo "  Expires: ${expiration}"
-    echo "  Certbot: ${CERTBOT_VERSION}"
-    echo "  Renewal: ${RENEWAL_SCHEDULER}"
-
-    echo
-    echo "Nginx:"
-    echo "  Service: nginx.service"
-    echo "  Status: $(systemctl is-active nginx.service)"
-    echo "  Bind address: ${BIND_ADDRESS}"
-    echo "  HTTP port: 80"
-    echo "  HTTPS port: 443"
-    echo "  Configuration: ${NGINX_SITE_AVAILABLE}"
-
-    echo
-    echo "Information files:"
-    echo "  ${QBT_CREDENTIAL_FILE}"
-    echo "  ${DOWNLOAD_INFO_FILE}"
-    echo "  ${SSL_INFO_FILE}"
-
-    echo
-    echo "UFW:"
-    echo "  ${UFW_STATUS}"
-
-    echo
-    echo "================================================================"
-    echo "Important:"
-    echo "TCP port 80 must remain publicly reachable for automatic renewal."
-    echo "The public IPv4 must remain assigned to or forwarded to this server."
-    echo "================================================================"
+    printf '\nSecurity warning:\n'
+    printf '  Files on ports 80 and 443 are public and have no password.\n'
 }
 
-require_root
+main() {
+    require_root
+    require_ubuntu
 
-validate_port "${WEBUI_PORT}" "Web UI port"
-validate_port "${TORRENT_PORT}" "torrent port"
-validate_boolean "${LETSENCRYPT_STAGING}" "LETSENCRYPT_STAGING"
+    validate_port "${WEBUI_PORT}" "WEBUI_PORT"
+    validate_port "${TORRENT_PORT}" "TORRENT_PORT"
+    validate_boolean "${RESET_QBT_PASSWORD}" "RESET_QBT_PASSWORD"
+    validate_boolean "${LETSENCRYPT_STAGING}" "LETSENCRYPT_STAGING"
+    validate_boolean "${RUN_RENEWAL_DRY_RUN}" "RUN_RENEWAL_DRY_RUN"
 
-export DEBIAN_FRONTEND=noninteractive
+    [[ "${WEBUI_PORT}" != "80" && "${WEBUI_PORT}" != "443" ]] \
+        || die "WEBUI_PORT cannot be 80 or 443."
 
-read_existing_download_paths
-install_missing_apt_packages
+    [[ "${TORRENT_PORT}" != "80" && "${TORRENT_PORT}" != "443" ]] \
+        || die "TORRENT_PORT cannot be 80 or 443."
 
-detect_public_ipv4
-detect_bind_address
-initialize_certificate_paths
+    [[ "${WEBUI_PORT}" != "${TORRENT_PORT}" ]] \
+        || die "WEBUI_PORT and TORRENT_PORT must be different."
 
-ensure_latest_qbittorrent
+    rm -f "${STATE_FILE}" 2>/dev/null || true
 
-QBT_VERSION="$(get_qbittorrent_version)"
-read_existing_qbittorrent_credentials
+    install_base_packages
+    install_official_docker_if_needed
+    detect_public_ip
+    initialize_certificate_paths
 
-prepare_directories
-configure_ufw_before_certificate
-install_certbot_snap
+    stop_previous_native_services
+    stop_previous_containers
 
-# When a usable certificate already exists, keep HTTPS online while
-# Certbot checks whether renewal is required. Otherwise, start with HTTP.
-if certificate_matches_public_ip && certificate_is_currently_valid; then
-    write_nginx_https_config
-else
-    write_nginx_http_only_config
+    check_port_is_free 80 "Docker Nginx"
+    check_port_is_free 443 "Docker Nginx"
+    check_port_is_free "${WEBUI_PORT}" "qBittorrent WebUI"
+    check_port_is_free "${TORRENT_PORT}" "qBittorrent torrent traffic"
+    check_udp_port_is_free "${TORRENT_PORT}" "qBittorrent torrent traffic"
+
+    configure_ufw_if_active
+    prepare_directories
+    migrate_previous_data
+    configure_qbittorrent_offline
+
+    write_environment_file
+    write_compose_file
+    write_nginx_reload_script
+    write_nginx_http_config
+
+    validate_generated_files
+    start_http_stack
+    verify_qbittorrent_authentication
+    obtain_certificate
+    enable_https_and_renewal
+    verify_direct_downloads
+    write_information_files
+
+    compose ps
+    install -m 0600 /dev/null "${STATE_FILE}"
+    printf 'installer_version=%s\ncompleted_at=%s\n' \
+        "${SCRIPT_VERSION}" "$(date --iso-8601=seconds)" \
+        > "${STATE_FILE}"
+    INSTALL_COMPLETE=1
+    print_summary
+}
+
+if [[ "${TTDD_SOURCE_ONLY:-0}" != "1" ]]; then
+    main "$@"
 fi
-
-obtain_or_reuse_ip_certificate
-verify_certificate_chain
-write_nginx_https_config
-configure_automatic_renewal
-verify_http_and_https_locally
-write_information_files
-print_summary
