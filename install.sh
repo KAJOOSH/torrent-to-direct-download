@@ -613,13 +613,26 @@ qbt_api_login() {
 
     rm -f "${response_file}"
 
-    if grep -Eq '(^|[[:space:]])SID[[:space:]]' "${COOKIE_FILE}" 2>/dev/null; then
+    # qBittorrent 5.2+ appends the WebUI port to the session
+    # cookie name. Depending on the configured port, curl may therefore
+    # store SID_8080 instead of the older SID name. HttpOnly cookie rows
+    # also begin with "#HttpOnly_", so inspect the final cookie fields
+    # rather than filtering comment-prefixed lines.
+    if awk '
+        NF >= 7 && $(NF - 1) ~ /^SID([_-].*)?$/ && length($NF) > 0 {
+            found = 1
+        }
+        END {
+            exit(found ? 0 : 1)
+        }
+    ' "${COOKIE_FILE}" 2>/dev/null; then
         QBT_LOGIN_COOKIE_PRESENT=1
     fi
 
-    # The official API defines the SID cookie as the successful-login
-    # indicator. Do not depend only on the optional "Ok." response body.
-    [[ "${QBT_LOGIN_HTTP_CODE}" == "200" &&
+    # New WebAPI versions use 204 No Content for successful operations
+    # without a response body. Older supported versions may still use 200.
+    [[ ( "${QBT_LOGIN_HTTP_CODE}" == "200" ||
+         "${QBT_LOGIN_HTTP_CODE}" == "204" ) &&
        "${QBT_LOGIN_COOKIE_PRESENT}" -eq 1 ]]
 }
 
@@ -790,7 +803,7 @@ configure_qbittorrent_via_api() {
         echo "Initial qBittorrent API login failed after automatic recovery."
         echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
         echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
-        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
+        echo "Session cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
         echo "Username: ${WEBUI_USER}"
         echo
         echo "Current container logs:"
@@ -839,7 +852,8 @@ configure_qbittorrent_via_api() {
             "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences"
     )"
 
-    if [[ "${settings_status}" != "200" ]]; then
+    if [[ "${settings_status}" != "200" &&
+          "${settings_status}" != "204" ]]; then
         echo "Saving qBittorrent preferences failed."
         echo "HTTP status: ${settings_status}"
         exit 1
@@ -854,7 +868,7 @@ configure_qbittorrent_via_api() {
         echo "The permanent Web UI password was saved but could not be verified."
         echo "HTTP status: ${QBT_LOGIN_HTTP_CODE:-unknown}"
         echo "Response body: ${QBT_LOGIN_BODY:-<empty>}"
-        echo "SID cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
+        echo "Session cookie received: ${QBT_LOGIN_COOKIE_PRESENT}"
         exit 1
     fi
 
