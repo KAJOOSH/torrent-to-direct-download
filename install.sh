@@ -13,7 +13,7 @@ umask 077
 # The installer itself runs on the Ubuntu host as root and creates a
 # Docker Compose stack under /opt/torrent-to-direct-download.
 
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 STACK_NAME="torrent-to-direct-download"
 STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
 DATA_DIR="${DATA_DIR:-/srv/qbittorrent}"
@@ -51,9 +51,12 @@ LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
 LETSENCRYPT_STAGING="${LETSENCRYPT_STAGING:-0}"
 RUN_RENEWAL_DRY_RUN="${RUN_RENEWAL_DRY_RUN:-1}"
 
-CREDENTIAL_FILE="/root/qbittorrent-credentials.txt"
-DOWNLOAD_INFO_FILE="/root/qbittorrent-download-info.txt"
-SSL_INFO_FILE="/root/qbittorrent-ip-ssl-info.txt"
+CREDENTIAL_FILE="${CREDENTIAL_FILE:-/root/qbittorrent-credentials.txt}"
+DOWNLOAD_INFO_FILE="${DOWNLOAD_INFO_FILE:-/root/qbittorrent-download-info.txt}"
+SSL_INFO_FILE="${SSL_INFO_FILE:-/root/qbittorrent-ip-ssl-info.txt}"
+ERROR_REPORT_FILE="${ERROR_REPORT_FILE:-/root/torrent-to-direct-download-error.log}"
+CERTBOT_ISSUE_LOG="${STACK_DIR}/certbot-issue.log"
+CERTBOT_RENEW_TEST_LOG="${STACK_DIR}/certbot-renew-dry-run.log"
 STATE_FILE="${STACK_DIR}/.installation-complete"
 INSTALL_COMPLETE=0
 
@@ -76,46 +79,173 @@ compose() {
         "$@"
 }
 
+CURRENT_STAGE="initialization"
+LAST_ERROR_MESSAGE=""
+ERROR_REPORTING=0
+
 log() {
+    CURRENT_STAGE="$*"
     printf '\n>>> %s\n' "$*"
 }
 
+print_failure_report() {
+    local exit_code="${1:-1}"
+    local line_number="${2:-unknown}"
+    local message="${3:-Unexpected command failure}"
+
+    if [[ "${ERROR_REPORTING}" == "1" ]]; then
+        return
+    fi
+
+    ERROR_REPORTING=1
+    trap - ERR
+    set +e
+
+    install -d -m 0700 "$(dirname "${ERROR_REPORT_FILE}")" 2>/dev/null || true
+
+    {
+        printf '\n============================================================\n'
+        printf 'torrent-to-direct-download diagnostic report\n'
+        printf '============================================================\n'
+        printf 'Time:       %s\n' "$(date --iso-8601=seconds 2>/dev/null || date)"
+        printf 'Version:    %s\n' "${SCRIPT_VERSION}"
+        printf 'Stage:      %s\n' "${CURRENT_STAGE}"
+        printf 'Line:       %s\n' "${line_number}"
+        printf 'Exit code:  %s\n' "${exit_code}"
+        printf 'Error:      %s\n' "${message}"
+        printf 'Report:     %s\n' "${ERROR_REPORT_FILE}"
+
+        printf '\n--- Host information ---\n'
+        uname -a || true
+        if [[ -r /etc/os-release ]]; then
+            cat /etc/os-release || true
+        fi
+        printf '\nDisk usage:\n'
+        df -hT "${STACK_DIR}" "${DATA_DIR}" 2>&1 || df -hT 2>&1 || true
+        printf '\nListening TCP/UDP ports:\n'
+        ss -lntup 2>&1 || true
+
+        printf '\n--- Relevant host paths and permissions ---\n'
+        for path in \
+            "${DATA_DIR}" \
+            "${DOWNLOAD_DIR}" \
+            "${ACME_DIR}" \
+            "${ACME_DIR}/.well-known" \
+            "${ACME_DIR}/.well-known/acme-challenge" \
+            "${ACME_DIR}/.well-known/acme-challenge/installer-test" \
+            "${LETSENCRYPT_DIR}" \
+            "${NGINX_CONF_DIR}/default.conf"; do
+            printf '\nPath: %s\n' "${path}"
+            if command -v namei >/dev/null 2>&1; then
+                namei -l "${path}" 2>&1 || true
+            fi
+            stat -c 'mode=%a owner=%U:%G uid=%u gid=%g type=%F size=%s path=%n' \
+                "${path}" 2>&1 || true
+            ls -ladn "${path}" 2>&1 || true
+        done
+
+        if command -v docker >/dev/null 2>&1; then
+            printf '\n--- Docker information ---\n'
+            docker version 2>&1 || true
+            docker info 2>&1 || true
+
+            if [[ -f "${COMPOSE_FILE}" && -f "${ENV_FILE}" ]]; then
+                printf '\n--- Docker Compose configuration validation ---\n'
+                compose config 2>&1 || true
+
+                printf '\n--- Docker Compose status ---\n'
+                compose ps -a 2>&1 || true
+
+                printf '\n--- Container states and mounts ---\n'
+                for container in \
+                    "${QBT_CONTAINER}" \
+                    "${NGINX_CONTAINER}" \
+                    "${CERTBOT_RENEW_CONTAINER}"; do
+                    printf '\nContainer: %s\n' "${container}"
+                    docker inspect \
+                        --format 'State={{json .State}}\nMounts={{json .Mounts}}' \
+                        "${container}" 2>&1 || true
+                done
+
+                printf '\n--- qBittorrent logs (last 300 lines) ---\n'
+                compose logs --no-color --tail=300 qbittorrent 2>&1 || true
+
+                printf '\n--- Nginx logs (last 300 lines) ---\n'
+                compose logs --no-color --tail=300 nginx 2>&1 || true
+
+                printf '\n--- Certbot renewal logs (last 300 lines) ---\n'
+                compose logs --no-color --tail=300 certbot-renew 2>&1 || true
+
+                printf '\n--- Nginx effective configuration ---\n'
+                compose exec -T nginx nginx -T 2>&1 || true
+
+                printf '\n--- Nginx container identity and ACME permissions ---\n'
+                compose exec -T nginx sh -c '
+                    id
+                    printf "\\nDirectory listing:\\n"
+                    ls -ladn /var/www /var/www/certbot \
+                        /var/www/certbot/.well-known \
+                        /var/www/certbot/.well-known/acme-challenge 2>&1 || true
+                    printf "\\nChallenge files:\\n"
+                    ls -lan /var/www/certbot/.well-known/acme-challenge 2>&1 || true
+                    printf "\\nTest file metadata:\\n"
+                    stat /var/www/certbot/.well-known/acme-challenge/installer-test 2>&1 || true
+                    printf "\\nTest file body as root:\\n"
+                    cat /var/www/certbot/.well-known/acme-challenge/installer-test 2>&1 || true
+                ' 2>&1 || true
+
+                printf '\n--- ACME file readability as the Nginx worker user ---\n'
+                compose exec -T --user nginx nginx sh -c '
+                    id
+                    test -r /var/www/certbot/.well-known/acme-challenge/installer-test
+                    cat /var/www/certbot/.well-known/acme-challenge/installer-test
+                ' 2>&1 || true
+            fi
+        fi
+
+        printf '\n--- Local HTTP diagnostics ---\n'
+        curl -sS -i --max-time 10 \
+            -H "Host: ${PUBLIC_IP:-localhost}" \
+            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            2>&1 || true
+
+        printf '\nVerbose request:\n'
+        curl -sv --max-time 10 \
+            -H "Host: ${PUBLIC_IP:-localhost}" \
+            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            -o /dev/null 2>&1 || true
+
+        if [[ -s "${CERTBOT_ISSUE_LOG}" ]]; then
+            printf '\n--- Certbot issuance output ---\n'
+            tail -n 400 "${CERTBOT_ISSUE_LOG}" 2>&1 || true
+        fi
+
+        if [[ -s "${CERTBOT_RENEW_TEST_LOG}" ]]; then
+            printf '\n--- Certbot renewal dry-run output ---\n'
+            tail -n 400 "${CERTBOT_RENEW_TEST_LOG}" 2>&1 || true
+        fi
+
+        printf '\n============================================================\n'
+        printf 'The containers were intentionally left running for inspection.\n'
+        printf 'After fixing the issue, rerun the installer; it will replace them safely.\n'
+        printf 'Full report: %s\n' "${ERROR_REPORT_FILE}"
+        printf '============================================================\n'
+    } 2>&1 | tee "${ERROR_REPORT_FILE}" >&2
+}
+
 die() {
-    printf '\nERROR: %s\n' "$*" >&2
+    LAST_ERROR_MESSAGE="$*"
+    print_failure_report 1 "${BASH_LINENO[0]:-unknown}" "${LAST_ERROR_MESSAGE}"
     exit 1
 }
 
 on_error() {
     local exit_code=$?
     local line_number="${1:-unknown}"
-
-    printf '\n============================================================\n' >&2
-    printf 'Installation failed at line %s (exit code %s).\n' \
-        "${line_number}" "${exit_code}" >&2
-    printf '============================================================\n' >&2
-
-    if command -v docker >/dev/null 2>&1 \
-        && [[ -f "${COMPOSE_FILE}" ]] \
-        && [[ -f "${ENV_FILE}" ]]; then
-        printf '\nDocker Compose status:\n' >&2
-        compose ps 2>/dev/null || true
-
-        printf '\nRecent qBittorrent logs:\n' >&2
-        compose logs --tail=100 qbittorrent 2>/dev/null || true
-
-        printf '\nRecent Nginx logs:\n' >&2
-        compose logs --tail=100 nginx 2>/dev/null || true
-
-        printf '\nRecent Certbot renewal logs:\n' >&2
-        compose logs --tail=100 certbot-renew 2>/dev/null || true
-
-        if [[ "${INSTALL_COMPLETE:-0}" != "1" ]]; then
-            printf '\nStopping the incomplete Compose stack. Persistent data is preserved.\n' >&2
-            compose down --remove-orphans 2>/dev/null || true
-            rm -f "${STATE_FILE}" 2>/dev/null || true
-        fi
-    fi
-
+    print_failure_report \
+        "${exit_code}" \
+        "${line_number}" \
+        "${LAST_ERROR_MESSAGE:-Command failed unexpectedly}"
     exit "${exit_code}"
 }
 
@@ -444,7 +574,14 @@ prepare_directories() {
     install -d -m 0755 "${DOWNLOAD_DIR}"
     install -d -m 0755 "${INCOMPLETE_DIR}"
     install -d -m 0755 "${LETSENCRYPT_DIR}"
+    install -d -m 0755 "${ACME_DIR}"
+    install -d -m 0755 "${ACME_DIR}/.well-known"
     install -d -m 0755 "${ACME_DIR}/.well-known/acme-challenge"
+
+    # Existing directories from an older run may have been created while
+    # the installer used umask 077. Nginx workers must be able to traverse
+    # the complete ACME path, so enforce the public challenge permissions.
+    chmod 0755         "${DATA_DIR}"         "${ACME_DIR}"         "${ACME_DIR}/.well-known"         "${ACME_DIR}/.well-known/acme-challenge"
 
     install -d -m 0755 "$(dirname "${QBT_CONFIG_FILE}")"
     install -d -m 0755 "${QBT_DATA_DIR}"
@@ -818,6 +955,8 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
 }
 NGINX
+
+    chmod 0644 "${NGINX_CONF_DIR}/default.conf"
 }
 
 write_nginx_https_config() {
@@ -897,6 +1036,8 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
 }
 EOF
+
+    chmod 0644 "${NGINX_CONF_DIR}/default.conf"
 }
 
 validate_generated_files() {
@@ -944,37 +1085,109 @@ PY
     printf 'Certbot version: %s\n' "${certbot_version}"
 }
 
+write_public_text_file() {
+    local destination="$1"
+    local content="$2"
+    local temporary=""
+
+    install -d -m 0755 "$(dirname "${destination}")"
+    temporary="$(mktemp "$(dirname "${destination}")/.ttdd-public.XXXXXX")"
+    printf '%s\n' "${content}" > "${temporary}"
+    chmod 0644 "${temporary}"
+    mv -f "${temporary}" "${destination}"
+}
+
 start_http_stack() {
     log "Starting qBittorrent and the HTTP-only Nginx container."
 
     compose up -d qbittorrent nginx
 
     local attempt
+    local qbt_status="000"
+    local qbt_body=""
+    qbt_body="$(mktemp)"
+
     for attempt in $(seq 1 90); do
-        if curl -fsS --max-time 2 \
-            "http://127.0.0.1:${WEBUI_PORT}/" \
-            >/dev/null 2>&1; then
+        qbt_status="$(
+            curl -sS --max-time 2 \
+                --output "${qbt_body}" \
+                --write-out '%{http_code}' \
+                "http://127.0.0.1:${WEBUI_PORT}/" \
+                2>/dev/null || printf '000'
+        )"
+
+        if [[ "${qbt_status}" == "200" ]]; then
             break
+        fi
+
+        if ! compose ps --status running qbittorrent \
+            | grep -q 'ttdd-qbittorrent'; then
+            cat "${qbt_body}" >&2 || true
+            rm -f "${qbt_body}"
+            die "The qBittorrent container stopped before its WebUI became ready."
         fi
 
         sleep 1
     done
 
-    curl -fsS --max-time 5 \
-        "http://127.0.0.1:${WEBUI_PORT}/" \
-        >/dev/null \
-        || die "qBittorrent WebUI did not become available."
+    if [[ "${qbt_status}" != "200" ]]; then
+        printf 'Last qBittorrent HTTP status: %s\n' "${qbt_status}" >&2
+        printf 'Last qBittorrent response body:\n' >&2
+        cat "${qbt_body}" >&2 || true
+        rm -f "${qbt_body}"
+        die "qBittorrent WebUI did not become available."
+    fi
+    rm -f "${qbt_body}"
 
-    printf 'acme-ok\n' > "${ACME_DIR}/.well-known/acme-challenge/installer-test"
+    local challenge_file="${ACME_DIR}/.well-known/acme-challenge/installer-test"
+    local response_headers=""
+    local response_body=""
+    local response_status="000"
 
-    [[ "$(
-        curl -fsS --max-time 5 \
+    # The installer uses umask 077 to protect secrets. ACME challenge files
+    # are intentionally public and must therefore be explicitly mode 0644.
+    write_public_text_file "${challenge_file}" "acme-ok"
+
+    stat -c 'ACME test file: mode=%a owner=%U:%G path=%n' \
+        "${challenge_file}"
+
+    compose exec -T --user nginx nginx sh -c '
+        test -r /var/www/certbot/.well-known/acme-challenge/installer-test
+        test "$(cat /var/www/certbot/.well-known/acme-challenge/installer-test)" = "acme-ok"
+    ' || die "The Nginx worker user cannot read the mounted ACME challenge file."
+
+    response_headers="$(mktemp)"
+    response_body="$(mktemp)"
+
+    response_status="$(
+        curl -sS --max-time 10 \
+            --dump-header "${response_headers}" \
+            --output "${response_body}" \
+            --write-out '%{http_code}' \
             -H "Host: ${PUBLIC_IP}" \
-            "http://127.0.0.1/.well-known/acme-challenge/installer-test"
-    )" == "acme-ok" ]] \
-        || die "Nginx ACME webroot test failed."
+            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            || printf '000'
+    )"
 
-    rm -f "${ACME_DIR}/.well-known/acme-challenge/installer-test"
+    if [[ "${response_status}" != "200" ]] \
+        || [[ "$(tr -d '\r\n' < "${response_body}")" != "acme-ok" ]]; then
+        printf '\nACME HTTP test failed.\n' >&2
+        printf 'Expected status: 200\n' >&2
+        printf 'Actual status:   %s\n' "${response_status}" >&2
+        printf '\nResponse headers:\n' >&2
+        cat "${response_headers}" >&2 || true
+        printf '\nResponse body:\n' >&2
+        cat "${response_body}" >&2 || true
+        rm -f "${response_headers}" "${response_body}"
+        die "Nginx ACME webroot test failed."
+    fi
+
+    rm -f \
+        "${response_headers}" \
+        "${response_body}" \
+        "${challenge_file}"
+
+    printf 'Nginx ACME webroot test passed with HTTP 200.\n'
 }
 
 verify_qbittorrent_authentication() {
@@ -1084,7 +1297,11 @@ obtain_certificate() {
         args+=(--staging)
     fi
 
-    compose --profile tools run --rm certbot "${args[@]}"
+    rm -f "${CERTBOT_ISSUE_LOG}"
+    if ! compose --profile tools run --rm certbot "${args[@]}" \
+        2>&1 | tee "${CERTBOT_ISSUE_LOG}"; then
+        die "Certbot failed to issue or reuse the IP certificate."
+    fi
 
     [[ -s "${CERT_FULLCHAIN}" && -s "${CERT_PRIVATE_KEY}" ]] \
         || die "Certbot completed without creating the expected certificate files."
@@ -1155,9 +1372,13 @@ enable_https_and_renewal() {
 
     if [[ "${RUN_RENEWAL_DRY_RUN}" == "1" ]]; then
         log "Running a complete Certbot renewal dry-run."
-        compose --profile tools run --rm certbot \
+        rm -f "${CERTBOT_RENEW_TEST_LOG}"
+        if ! compose --profile tools run --rm certbot \
             renew \
-            --dry-run
+            --dry-run \
+            2>&1 | tee "${CERTBOT_RENEW_TEST_LOG}"; then
+            die "Certbot renewal dry-run failed."
+        fi
     fi
 }
 
@@ -1328,7 +1549,7 @@ main() {
     [[ "${WEBUI_PORT}" != "${TORRENT_PORT}" ]] \
         || die "WEBUI_PORT and TORRENT_PORT must be different."
 
-    rm -f "${STATE_FILE}" 2>/dev/null || true
+    rm -f "${STATE_FILE}" "${ERROR_REPORT_FILE}" 2>/dev/null || true
 
     install_base_packages
     install_official_docker_if_needed

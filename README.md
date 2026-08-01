@@ -84,6 +84,8 @@ curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/
 
 ## Important
 
+- If installation fails, a complete diagnostic report is saved to `/root/torrent-to-direct-download-error.log`.
+- Failed containers remain running so their logs and mounts can be inspected. Rerunning the installer replaces them safely.
 - Completed files on ports `80` and `443` are public and have no password.
 - Port `80` must remain publicly reachable for certificate renewal.
 - The qBittorrent WebUI is protected with a generated password but is served over HTTP on port `8080`.
