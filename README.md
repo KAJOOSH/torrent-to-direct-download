@@ -94,3 +94,13 @@ curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/
 ## Project goal
 
 This project is intended for people who want a small self-hosted server that receives files from the BitTorrent network and then offers those completed files as ordinary direct downloads for users, browsers, media players, or download managers.
+
+## Version 2.2.1 fix
+
+Version 2.2.1 fixes a post-install crash that occurred after all services and
+download tests had already succeeded. The installer no longer starts a second
+`qbittorrent-nox` process only to read its version. It reuses the version
+returned by the authenticated Web API instead.
+
+Runtime version reporting is now non-critical, and diagnostic reports include
+the exact failed command and Bash function stack.

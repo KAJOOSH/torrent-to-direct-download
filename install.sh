@@ -13,7 +13,7 @@ umask 077
 # The installer itself runs on the Ubuntu host as root and creates a
 # Docker Compose stack under /opt/torrent-to-direct-download.
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.2.1"
 STACK_NAME="torrent-to-direct-download"
 STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
 DATA_DIR="${DATA_DIR:-/srv/qbittorrent}"
@@ -66,6 +66,7 @@ CERT_FULLCHAIN=""
 CERT_PRIVATE_KEY=""
 CERT_CERT=""
 CERT_CHAIN=""
+QBT_RUNTIME_VERSION=""
 
 BACKUP_STAMP="$(date +%Y%m%d-%H%M%S)"
 QBT_CONFIG_FILE="${QBT_CONFIG_DIR}/qBittorrent/config/qBittorrent.conf"
@@ -92,6 +93,8 @@ print_failure_report() {
     local exit_code="${1:-1}"
     local line_number="${2:-unknown}"
     local message="${3:-Unexpected command failure}"
+    local failed_command="${4:-unknown}"
+    local function_stack="${5:-unknown}"
 
     if [[ "${ERROR_REPORTING}" == "1" ]]; then
         return
@@ -113,6 +116,8 @@ print_failure_report() {
         printf 'Line:       %s\n' "${line_number}"
         printf 'Exit code:  %s\n' "${exit_code}"
         printf 'Error:      %s\n' "${message}"
+        printf 'Command:    %s\n' "${failed_command}"
+        printf 'Functions:  %s\n' "${function_stack}"
         printf 'Report:     %s\n' "${ERROR_REPORT_FILE}"
 
         printf '\n--- Host information ---\n'
@@ -132,7 +137,7 @@ print_failure_report() {
             "${ACME_DIR}" \
             "${ACME_DIR}/.well-known" \
             "${ACME_DIR}/.well-known/acme-challenge" \
-            "${ACME_DIR}/.well-known/acme-challenge/installer-test" \
+            "${ACME_DIR}/.well-known/acme-challenge/diagnostic-test" \
             "${LETSENCRYPT_DIR}" \
             "${NGINX_CONF_DIR}/default.conf"; do
             printf '\nPath: %s\n' "${path}"
@@ -179,6 +184,11 @@ print_failure_report() {
                 printf '\n--- Nginx effective configuration ---\n'
                 compose exec -T nginx nginx -T 2>&1 || true
 
+                diagnostic_challenge="${ACME_DIR}/.well-known/acme-challenge/diagnostic-test"
+                install -d -m 0755 "$(dirname "${diagnostic_challenge}")" 2>/dev/null || true
+                printf 'diagnostic-ok\n' > "${diagnostic_challenge}" 2>/dev/null || true
+                chmod 0644 "${diagnostic_challenge}" 2>/dev/null || true
+
                 printf '\n--- Nginx container identity and ACME permissions ---\n'
                 compose exec -T nginx sh -c '
                     id
@@ -189,16 +199,16 @@ print_failure_report() {
                     printf "\\nChallenge files:\\n"
                     ls -lan /var/www/certbot/.well-known/acme-challenge 2>&1 || true
                     printf "\\nTest file metadata:\\n"
-                    stat /var/www/certbot/.well-known/acme-challenge/installer-test 2>&1 || true
+                    stat /var/www/certbot/.well-known/acme-challenge/diagnostic-test 2>&1 || true
                     printf "\\nTest file body as root:\\n"
-                    cat /var/www/certbot/.well-known/acme-challenge/installer-test 2>&1 || true
+                    cat /var/www/certbot/.well-known/acme-challenge/diagnostic-test 2>&1 || true
                 ' 2>&1 || true
 
                 printf '\n--- ACME file readability as the Nginx worker user ---\n'
                 compose exec -T --user nginx nginx sh -c '
                     id
-                    test -r /var/www/certbot/.well-known/acme-challenge/installer-test
-                    cat /var/www/certbot/.well-known/acme-challenge/installer-test
+                    test -r /var/www/certbot/.well-known/acme-challenge/diagnostic-test
+                    cat /var/www/certbot/.well-known/acme-challenge/diagnostic-test
                 ' 2>&1 || true
             fi
         fi
@@ -206,13 +216,13 @@ print_failure_report() {
         printf '\n--- Local HTTP diagnostics ---\n'
         curl -sS -i --max-time 10 \
             -H "Host: ${PUBLIC_IP:-localhost}" \
-            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            'http://127.0.0.1/.well-known/acme-challenge/diagnostic-test' \
             2>&1 || true
 
         printf '\nVerbose request:\n'
         curl -sv --max-time 10 \
             -H "Host: ${PUBLIC_IP:-localhost}" \
-            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            'http://127.0.0.1/.well-known/acme-challenge/diagnostic-test' \
             -o /dev/null 2>&1 || true
 
         if [[ -s "${CERTBOT_ISSUE_LOG}" ]]; then
@@ -225,6 +235,8 @@ print_failure_report() {
             tail -n 400 "${CERTBOT_RENEW_TEST_LOG}" 2>&1 || true
         fi
 
+        rm -f "${ACME_DIR}/.well-known/acme-challenge/diagnostic-test" 2>/dev/null || true
+
         printf '\n============================================================\n'
         printf 'The containers were intentionally left running for inspection.\n'
         printf 'After fixing the issue, rerun the installer; it will replace them safely.\n'
@@ -235,21 +247,31 @@ print_failure_report() {
 
 die() {
     LAST_ERROR_MESSAGE="$*"
-    print_failure_report 1 "${BASH_LINENO[0]:-unknown}" "${LAST_ERROR_MESSAGE}"
+    print_failure_report \
+        1 \
+        "${BASH_LINENO[0]:-unknown}" \
+        "${LAST_ERROR_MESSAGE}" \
+        "${BASH_COMMAND:-unknown}" \
+        "${FUNCNAME[*]:-unknown}"
     exit 1
 }
 
 on_error() {
     local exit_code=$?
     local line_number="${1:-unknown}"
+    local failed_command="${2:-unknown}"
+    local function_stack="${3:-unknown}"
+
     print_failure_report \
         "${exit_code}" \
         "${line_number}" \
-        "${LAST_ERROR_MESSAGE:-Command failed unexpectedly}"
+        "${LAST_ERROR_MESSAGE:-Command failed unexpectedly}" \
+        "${failed_command}" \
+        "${function_stack}"
     exit "${exit_code}"
 }
 
-trap 'on_error "$LINENO"' ERR
+trap 'on_error "$LINENO" "$BASH_COMMAND" "${FUNCNAME[*]}"' ERR
 
 require_root() {
     [[ "${EUID}" -eq 0 ]] || die "Run this installer as root."
@@ -1139,7 +1161,7 @@ start_http_stack() {
     fi
     rm -f "${qbt_body}"
 
-    local challenge_file="${ACME_DIR}/.well-known/acme-challenge/installer-test"
+    local challenge_file="${ACME_DIR}/.well-known/acme-challenge/diagnostic-test"
     local response_headers=""
     local response_body=""
     local response_status="000"
@@ -1152,8 +1174,8 @@ start_http_stack() {
         "${challenge_file}"
 
     compose exec -T --user nginx nginx sh -c '
-        test -r /var/www/certbot/.well-known/acme-challenge/installer-test
-        test "$(cat /var/www/certbot/.well-known/acme-challenge/installer-test)" = "acme-ok"
+        test -r /var/www/certbot/.well-known/acme-challenge/diagnostic-test
+        test "$(cat /var/www/certbot/.well-known/acme-challenge/diagnostic-test)" = "acme-ok"
     ' || die "The Nginx worker user cannot read the mounted ACME challenge file."
 
     response_headers="$(mktemp)"
@@ -1165,7 +1187,7 @@ start_http_stack() {
             --output "${response_body}" \
             --write-out '%{http_code}' \
             -H "Host: ${PUBLIC_IP}" \
-            'http://127.0.0.1/.well-known/acme-challenge/installer-test' \
+            'http://127.0.0.1/.well-known/acme-challenge/diagnostic-test' \
             || printf '000'
     )"
 
@@ -1262,8 +1284,12 @@ verify_qbittorrent_authentication() {
             die "qBittorrent returned an unexpected application version."
         }
 
+    QBT_RUNTIME_VERSION="$(
+        tr -d '\r\n' < "${version_body}"
+    )"
+
     printf 'Authenticated qBittorrent version: %s\n' \
-        "$(cat "${version_body}")"
+        "${QBT_RUNTIME_VERSION}"
 
     rm -f "${version_body}"
 }
@@ -1441,20 +1467,27 @@ write_information_files() {
             | cut -d= -f2-
     )"
 
-    qbt_version="$(
-        compose exec -T qbittorrent qbittorrent-nox --version \
-            | tr -d '\r'
-    )"
+    # qBittorrent is a single-instance application. Starting a second
+    # qbittorrent-nox process inside the running container can abort with
+    # exit code 134. Reuse the version returned by the authenticated Web API.
+    qbt_version="${QBT_RUNTIME_VERSION:-unknown}"
 
+    # Runtime version reporting is informational and must never turn an
+    # otherwise successful installation into a failure.
     nginx_version="$(
         compose exec -T nginx nginx -v 2>&1 \
-            | tr -d '\r'
+            | tr -d '\r' \
+            || true
     )"
 
     certbot_version="$(
-        compose --profile tools run --rm certbot --version \
-            | tr -d '\r'
+        compose --profile tools run --rm certbot --version 2>&1 \
+            | tr -d '\r' \
+            || true
     )"
+
+    [[ -n "${nginx_version}" ]] || nginx_version="nginx version: unknown"
+    [[ -n "${certbot_version}" ]] || certbot_version="certbot version: unknown"
 
     cat > "${DOWNLOAD_INFO_FILE}" <<EOF
 Direct Download Information
@@ -1581,8 +1614,11 @@ main() {
     obtain_certificate
     enable_https_and_renewal
     verify_direct_downloads
+
+    log "Writing installation information and collecting non-critical runtime metadata."
     write_information_files
 
+    log "Displaying the final Docker Compose status."
     compose ps
     install -m 0600 /dev/null "${STATE_FILE}"
     printf 'installer_version=%s\ncompleted_at=%s\n' \
