@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.0.3 — 2026-08-17
+
+### Added
+- Added the persistent `/usr/local/bin/ttdd` management command.
+- Added `sudo ttdd --update` for validated self-update from the project Raw `main` installer.
+- The updater downloads to a temporary file, validates Bash syntax/project identity/version, prevents downgrades, backs up the previous executable, and replaces the local command only after validation.
+- When an existing stack is present, a newer installer is applied immediately after the local executable is replaced.
+
+### Changed
+- The Raw GitHub URL is now used only for the initial bootstrap command in the public README.
+- Password reset, status, disk diagnostics, trash cleanup and SSL changes now use the persisted local `ttdd` command.
+- A successful normal installation persists the current installer as `/usr/local/bin/ttdd`; old `curl | bash` bootstrap commands are still handled by a compatibility fallback.
+- Rewrote the English and Persian READMEs for public GitHub users and moved release-oriented details out of the main usage flow.
+
 ## 3.0.2 — 2026-08-17
 
 Documentation / copy-paste command release.

@@ -35,11 +35,11 @@ The qBittorrent container gets `/srv/qbittorrent` mounted at `/data`. Nginx gets
 Old hidden trash is intentionally not erased automatically during an upgrade. Inspect it first:
 
 ```bash
-sudo bash install.sh --disk-check
+sudo ttdd --disk-check
 ```
 
 Then remove it permanently if it is the data you already intended to delete:
 
 ```bash
-sudo bash install.sh --purge-trash
+sudo ttdd --purge-trash
 ```

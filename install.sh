@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-# torrent-to-direct-download v3.0.2
+# torrent-to-direct-download v3.0.3
 # qBittorrent + Nginx + optional Let's Encrypt IP SSL for Ubuntu.
 #
 # Safety goals:
@@ -12,12 +12,14 @@ umask 077
 # - persistent data is never removed by install/update
 # - no Docker volume removal and no recursive chmod/chown over large downloads
 
-SCRIPT_VERSION="3.0.2"
+SCRIPT_VERSION="3.0.3"
 STACK_NAME="torrent-to-direct-download"
 STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
 COMPOSE_FILE="${STACK_DIR}/compose.yaml"
 ENV_FILE="${STACK_DIR}/.env"
 STATE_FILE="${STACK_DIR}/.installation-complete"
+INSTALLER_URL="${INSTALLER_URL:-https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh}"
+LOCAL_INSTALLER="${LOCAL_INSTALLER:-/usr/local/bin/ttdd}"
 
 # Preserve values explicitly provided by the caller before loading a previous .env.
 CALLER_KEYS=""
@@ -112,13 +114,14 @@ usage() {
 Torrent to Direct Download installer v${SCRIPT_VERSION}
 
 Usage:
-  sudo bash install.sh                    Install/update; first install asks about SSL first
-  sudo bash install.sh --enable-ssl       Install/update with HTTPS
-  sudo bash install.sh --disable-ssl      Install/update with HTTP only
-  sudo bash install.sh --reset-password   Reset qBittorrent password ONLY
-  sudo bash install.sh --disk-check       Diagnose disk usage and hidden trash
-  sudo bash install.sh --purge-trash      Permanently remove qBittorrent .Trash-* data
-  sudo bash install.sh --status           Show stack status and storage usage
+  sudo ttdd                              Install/reconfigure; first install asks about SSL first
+  sudo ttdd --update                     Download and apply a newer installer release
+  sudo ttdd --enable-ssl                 Install/reconfigure with HTTPS
+  sudo ttdd --disable-ssl                Install/reconfigure with HTTP only
+  sudo ttdd --reset-password             Reset qBittorrent password ONLY
+  sudo ttdd --disk-check                 Diagnose disk usage and hidden trash
+  sudo ttdd --purge-trash                Permanently remove qBittorrent .Trash-* data
+  sudo ttdd --status                     Show stack status and storage usage
 
 Useful environment overrides:
   QBT_PASSWORD='...'            Set a password (minimum 12 characters)
@@ -138,6 +141,7 @@ EOF
 for arg in "$@"; do
   case "${arg}" in
     --reset-password) ACTION="reset-password" ;;
+    --update) ACTION="update" ;;
     --disk-check) ACTION="disk-check" ;;
     --purge-trash) ACTION="purge-trash" ;;
     --status) ACTION="status" ;;
@@ -955,6 +959,109 @@ disk_check() {
   fi
 }
 
+replace_local_installer() {
+  local source_file="$1" target_dir target_tmp
+  target_dir="$(dirname "${LOCAL_INSTALLER}")"
+  install -d -m 0755 "${target_dir}"
+  target_tmp="${LOCAL_INSTALLER}.new.$$"
+  rm -f "${target_tmp}"
+  install -m 0755 "${source_file}" "${target_tmp}"
+  mv -f "${target_tmp}" "${LOCAL_INSTALLER}"
+}
+
+install_local_command() {
+  require_root
+  local src="${BASH_SOURCE[0]:-}" tmp=""
+  if [[ -n "${src}" && -f "${src}" && -r "${src}" ]]; then
+    src="$(readlink -f "${src}" 2>/dev/null || printf '%s' "${src}")"
+    if [[ "${src}" != "${LOCAL_INSTALLER}" ]]; then
+      replace_local_installer "${src}"
+    else
+      chmod 0755 "${LOCAL_INSTALLER}"
+    fi
+    return 0
+  fi
+
+  # Compatibility with older one-line `curl | bash` installation commands.
+  # New installations download directly to LOCAL_INSTALLER, so this is normally skipped.
+  tmp="$(mktemp /tmp/ttdd-local.XXXXXX)"
+  if ! curl --fail --silent --show-error --location \
+      --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 \
+      "${INSTALLER_URL}" -o "${tmp}"; then
+    rm -f "${tmp}"
+    die "Installation succeeded, but the local ttdd command could not be saved from ${INSTALLER_URL}."
+  fi
+  validate_downloaded_installer "${tmp}" >/dev/null
+  replace_local_installer "${tmp}"
+  rm -f "${tmp}"
+}
+
+extract_installer_version() {
+  sed -nE 's/^SCRIPT_VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$1" | head -n1
+}
+
+validate_downloaded_installer() {
+  local file="$1" version=""
+  [[ -s "${file}" ]] || die "Downloaded installer is empty."
+  bash -n "${file}" || die "Downloaded installer failed Bash syntax validation."
+  grep -Fq 'STACK_NAME="torrent-to-direct-download"' "${file}" || die "Downloaded file is not a torrent-to-direct-download installer."
+  grep -Fq 'raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download' "${file}" || die "Downloaded installer does not contain the expected project identity."
+  version="$(extract_installer_version "${file}")"
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Could not read a valid installer version from the downloaded file."
+  printf '%s' "${version}"
+}
+
+update_action() {
+  require_root
+  command -v curl >/dev/null 2>&1 || die "curl is required for updates."
+  command -v install >/dev/null 2>&1 || die "install command is required for updates."
+  command -v dpkg >/dev/null 2>&1 || die "dpkg is required for version comparison on Ubuntu."
+
+  log "Checking for a newer installer release."
+  local tmp latest backup=""
+  tmp="$(mktemp /tmp/ttdd-update.XXXXXX)"
+  if ! curl --fail --silent --show-error --location \
+      --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 \
+      "${INSTALLER_URL}" -o "${tmp}"; then
+    rm -f "${tmp}"
+    die "Could not download the latest installer from ${INSTALLER_URL}."
+  fi
+
+  latest="$(validate_downloaded_installer "${tmp}")"
+  printf 'Installed installer version: %s\nAvailable installer version: %s\n' "${SCRIPT_VERSION}" "${latest}"
+
+  if dpkg --compare-versions "${latest}" lt "${SCRIPT_VERSION}"; then
+    rm -f "${tmp}"
+    printf 'The remote installer is older than this copy; no downgrade was performed.\n'
+    install_local_command
+    return 0
+  fi
+
+  if dpkg --compare-versions "${latest}" eq "${SCRIPT_VERSION}"; then
+    replace_local_installer "${tmp}"
+    rm -f "${tmp}"
+    printf 'Installer is already up to date. Local command: %s\n' "${LOCAL_INSTALLER}"
+    return 0
+  fi
+
+  if [[ -e "${LOCAL_INSTALLER}" ]]; then
+    backup="${LOCAL_INSTALLER}.bak"
+    cp -a "${LOCAL_INSTALLER}" "${backup}"
+  fi
+  replace_local_installer "${tmp}"
+  rm -f "${tmp}"
+
+  printf 'Installer updated to v%s: %s\n' "${latest}" "${LOCAL_INSTALLER}"
+  [[ -n "${backup}" ]] && printf 'Previous installer backup: %s\n' "${backup}"
+
+  if [[ -f "${ENV_FILE}" && -f "${COMPOSE_FILE}" ]]; then
+    printf 'Applying v%s to the existing installation...\n' "${latest}"
+    exec "${LOCAL_INSTALLER}"
+  fi
+
+  printf 'No existing stack was detected. Run: sudo ttdd\n'
+}
+
 write_information_files() {
   cat > "${DOWNLOAD_INFO_FILE}" <<EOF
 Direct Download Information
@@ -975,7 +1082,7 @@ Not after: $(openssl x509 -in "${CERT_CERT}" -noout -enddate | cut -d= -f2-)
 Renewal container: ${CERTBOT_RENEW_CONTAINER}
 EOF
   else
-    printf 'SSL/HTTPS is disabled. Re-run install.sh --enable-ssl to enable it.\n' > "${SSL_INFO_FILE}"
+    printf 'SSL/HTTPS is disabled. Run sudo ttdd --enable-ssl to enable it.\n' > "${SSL_INFO_FILE}"
   fi
   chmod 0600 "${DOWNLOAD_INFO_FILE}" "${SSL_INFO_FILE}"
 }
@@ -990,8 +1097,8 @@ print_summary() {
   printf 'Downloads: %s\nIncomplete: %s\n' "${DOWNLOAD_DIR}" "${INCOMPLETE_DIR}"
   printf '\nDeletion mode: permanent when qBittorrent "also delete files" is selected.\n'
   if [[ -n "$(find_trash_dirs)" ]]; then
-    printf 'Old .Trash data detected. Inspect: sudo bash install.sh --disk-check\n'
-    printf 'Purge after review: sudo bash install.sh --purge-trash\n'
+    printf 'Old .Trash data detected. Inspect: sudo ttdd --disk-check\n'
+    printf 'Purge after review: sudo ttdd --purge-trash\n'
   fi
 }
 
@@ -1072,6 +1179,7 @@ main_install() {
   obtain_or_reuse_certificate
   enable_https_and_renewal
   verify_direct_downloads
+  install_local_command
   write_information_files
 
   printf 'installer_version=%s\ncompleted_at=%s\nenable_ssl=%s\n' "${SCRIPT_VERSION}" "$(date --iso-8601=seconds)" "${ENABLE_SSL}" > "${STATE_FILE}"
@@ -1083,6 +1191,7 @@ main_install() {
 if [[ "${TTDD_SOURCE_ONLY:-0}" != "1" ]]; then
   case "${ACTION}" in
     install) main_install ;;
+    update) update_action ;;
     reset-password) reset_password_only ;;
     disk-check) disk_check ;;
     purge-trash) purge_trash ;;

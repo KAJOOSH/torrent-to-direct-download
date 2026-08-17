@@ -1,4 +1,4 @@
-# Test Results — v3.0.0
+# Test Results — v3.0.3
 
 Date: 2026-08-17
 
@@ -6,19 +6,22 @@ Passed checks:
 
 - `bash -n install.sh`
 - `install.sh --help`
-- HTTP-only Compose YAML generation and parse
-- HTTPS/Certbot Compose YAML generation and parse
-- qBittorrent full-mode config generation
-- Permanent-delete key: `Session\TorrentContentRemoveOption=Delete`
-- Same-root v3 paths: `/data/downloads` and `/data/incomplete`
-- Password-only config mutation preserves existing storage path and does not inject full-install storage settings
-- Persisted `.env` values load correctly
-- Explicit environment overrides take priority over persisted `.env`
+- HTTP-only Compose generation
+- HTTPS/Certbot Compose generation
+- High-throughput Nginx settings and absence of generated `limit_conn` / `limit_req`
+- qBittorrent permanent-delete configuration
+- Same-root download paths: `/data/downloads` and `/data/incomplete`
+- Password-only configuration change preserves existing storage paths
+- Persisted `.env` values load correctly and explicit environment overrides still win
+- Local installer persistence to the `ttdd` command path
+- Self-update validation and replacement using a simulated newer installer
+- Static test suite no longer requires the external Python `PyYAML` module
 
 Not executed in the build environment:
 
 - A live production Ubuntu Docker deployment
-- A real public Let's Encrypt IP-certificate issuance/renewal
-- Real BitTorrent traffic and a multi-gigabyte delete test
+- Real public Let's Encrypt certificate issuance/renewal
+- Real BitTorrent traffic and multi-gigabyte file deletion
+- Internet throughput benchmarking
 
-The installer performs its own Compose/Nginx/qBittorrent runtime verification when run on the target Ubuntu server.
+The installer performs additional Compose, Nginx and qBittorrent runtime checks on the target Ubuntu server during installation.

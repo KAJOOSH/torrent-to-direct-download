@@ -1,163 +1,201 @@
-# Torrent to Direct Download — v3.0.2
+# Torrent to Direct Download
 
-Ubuntu installer for **qBittorrent + Nginx**, with optional Let's Encrypt IP SSL and a high-throughput direct-download profile.
+Run qBittorrent behind Nginx and download completed torrents directly over HTTP or HTTPS.
 
-This branch is a safety, storage and performance rewrite of upstream 2.2.1. Existing data under `/srv/qbittorrent` is preserved.
+[فارسی](README.fa.md)
 
-## What v3 fixes
+## Features
 
-- Password reset no longer reinstalls or rebuilds the whole system.
-- SSL/HTTPS is optional and is decided before the expensive installation steps.
-- Slow Certbot renewal dry-run is disabled by default.
-- qBittorrent file deletion is configured for permanent deletion instead of hidden `.Trash-*` retention.
-- Nginx reads the real completed-download directory through a read-only bind mount; it does **not** keep a second copy.
-- Complete/incomplete downloads live below one primary `/data` mount to avoid cross-mount copy behavior.
-- Nginx direct downloads use an explicit high-throughput/no-rate-limit profile in v3.0.2.
+- qBittorrent WebUI
+- Direct file downloads through Nginx
+- Optional Let's Encrypt HTTPS
+- High-throughput Nginx configuration with no application-level download rate limit
+- Persistent qBittorrent configuration and torrent resume data
+- Permanent file deletion support to avoid hidden `.Trash-*` disk usage
+- Safe password reset without reinstalling the stack
+- Built-in status, disk check, trash cleanup and self-update commands
 
-## Install / update
+## Quick install
 
-> **All management commands in this README run directly from the official Raw `main` installer**, so you do not need to download `install.sh` or clone the repository first. The URL used throughout is:
->
-> `https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh`
-
+Run this once on the server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh -o /tmp/ttdd && sudo install -m 0755 /tmp/ttdd /usr/local/bin/ttdd && rm -f /tmp/ttdd && sudo ttdd
 ```
 
-On the first install, the first important question is whether SSL/HTTPS should be enabled. Choose **No** for a faster HTTP-only setup or **Yes** to configure Let's Encrypt IP SSL.
+The installer is saved as:
 
-Non-interactive choices:
+```text
+/usr/local/bin/ttdd
+```
+
+After the first installation, you do not need to download `install.sh` again. Use the local `ttdd` command for all management tasks.
+
+During the first setup, the installer asks whether HTTPS should be enabled. Choosing HTTP-only skips certificate issuance and Certbot setup.
+
+## Common commands
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disable-ssl
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --enable-ssl
+# Show service and storage status
+sudo ttdd --status
+
+# Reset the qBittorrent WebUI password only
+sudo ttdd --reset-password
+
+# Check disk usage, hidden qBittorrent trash and deleted-but-open files
+sudo ttdd --disk-check
+
+# Permanently remove old qBittorrent .Trash-* directories after confirmation
+sudo ttdd --purge-trash
+
+# Enable HTTPS
+sudo ttdd --enable-ssl
+
+# Disable HTTPS
+sudo ttdd --disable-ssl
+
+# Check for a newer release and update the installation
+sudo ttdd --update
 ```
 
-Running the newer installer again is the supported update path. Existing downloads, qBittorrent resume data and configuration are preserved/backed up before mutation.
+To set a specific password during reset:
 
-## High-speed direct downloads — v3.0.2
+```bash
+sudo env QBT_PASSWORD='your-strong-password' ttdd --reset-password
+```
 
-The generated Nginx configuration intentionally contains **no per-IP connection limit, no request-rate limit and no response bandwidth limit**.
+## Updating
 
-Performance/capacity defaults:
+Update with:
+
+```bash
+sudo ttdd --update
+```
+
+The updater downloads the current `main` installer from GitHub to a temporary file, validates its Bash syntax and version, and only then replaces `/usr/local/bin/ttdd`.
+
+When a newer version is available:
+
+- the current local installer is backed up as `/usr/local/bin/ttdd.bak`;
+- the new installer replaces it atomically;
+- an older remote version is never used as a downgrade;
+- if an existing stack is detected, the new installer is immediately applied to it;
+- downloads, qBittorrent configuration and resume data are preserved.
+
+If the installed version is already current, no stack reinstall is performed.
+
+## Direct-download performance
+
+The generated Nginx configuration is intended for large static downloads and parallel download-manager connections.
+
+Default capacity settings include:
 
 - `worker_processes auto`
-- `worker_connections 65535` per worker
+- `worker_connections 65535`
 - `worker_rlimit_nofile 262144`
-- Docker `nofile` soft/hard limit: `262144`
-- container `net.core.somaxconn=65535`
-- `listen ... reuseport backlog=65535`
-- `limit_rate 0`
+- Docker `nofile` soft/hard limit `262144`
+- `net.core.somaxconn=65535`
+- `reuseport` with a large listen backlog
 - `sendfile on`
 - `tcp_nopush on`
 - `tcp_nodelay on`
 - `multi_accept on`
-- Nginx access log disabled to avoid unnecessary disk I/O during high-volume file serving
-- byte-range downloads remain enabled, so IDM/aria2/other download managers can use parallel range requests/connections
+- `limit_rate 0`
+- no generated `limit_conn`
+- no generated `limit_req`
+- Nginx access log disabled to avoid unnecessary disk writes during large transfers
 
-There is no artificial Nginx speed cap. Actual throughput is therefore bounded by the server NIC, route/ISP, disk/filesystem throughput, CPU/TLS cost, Docker/host networking, and the client side.
+Byte-range requests remain available, so IDM, aria2 and similar clients can use multiple connections for the same file.
 
-The high numeric connection limits are capacity ceilings, not a promise that every server can sustain that many active file transfers. They avoid the small default ceilings while leaving the Linux kernel and available hardware as the practical limit.
+Actual speed still depends on the server disk, network interface, route, CPU/TLS overhead, host networking and the client connection.
 
-Inspect the effective Nginx configuration after installation:
+Inspect the effective Nginx configuration:
 
 ```bash
 sudo docker exec ttdd-nginx nginx -T
 ```
 
-Check the important limits:
+## Storage
 
-```bash
-sudo docker exec ttdd-nginx sh -c 'ulimit -n; nginx -T 2>&1 | grep -E "worker_connections|worker_rlimit_nofile|limit_rate|reuseport|sendfile|multi_accept"'
+Default persistent paths:
+
+```text
+/srv/qbittorrent/config       qBittorrent configuration and state
+/srv/qbittorrent/downloads    completed downloads
+/srv/qbittorrent/incomplete   incomplete downloads
+/opt/torrent-to-direct-download
+                              generated Compose and Nginx files
 ```
 
-## Password reset — no reinstall
+Nginx receives the completed-download directory as a read-only bind mount. It serves the same host files and does not create a second copy.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --reset-password
-```
-
-To choose the new password yourself:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env QBT_PASSWORD='your-strong-password' bash -s -- --reset-password
-```
-
-The reset path does not run apt, pull images, reinstall Docker, rewrite Nginx/SSL, or touch downloaded content.
-
-The legacy form is also accepted:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RESET_QBT_PASSWORD=1 bash
-```
-
-## Disk-space diagnosis and old qBittorrent trash
-
-Check where space is being used:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
-```
-
-If old `.Trash-*` data is shown and it contains files you already intended to delete:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --purge-trash
-```
-
-Future qBittorrent deletes are configured for permanent removal with `Session\TorrentContentRemoveOption=Delete` when **also delete files** is selected.
-
-## Why Nginx does not double disk usage
-
-Nginx receives `/srv/qbittorrent/downloads` as a **read-only bind mount**. A bind mount exposes the same host files inside the Nginx container; it is not another storage copy.
-
-New qBittorrent paths are:
+qBittorrent uses:
 
 ```text
 /data/downloads
 /data/incomplete
 ```
 
-Legacy `/downloads` and `/incomplete` mounts remain only as compatibility aliases for old resume data. They point to the same host directories.
+inside the container. Legacy `/downloads` and `/incomplete` mounts remain available for older torrent resume data and point to the same host directories.
 
-## SSL behavior
+## Deleted files still using disk space
 
-A full Certbot renewal dry-run is no longer performed on every installation. It is opt-in:
+New qBittorrent configuration uses:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RUN_RENEWAL_DRY_RUN=1 bash -s -- --enable-ssl
+```text
+Session\TorrentContentRemoveOption=Delete
 ```
 
-A still-valid existing certificate is reused. SSL-disabled installations do not create Certbot renewal services or expose port 443.
+When torrent content is deleted, qBittorrent is configured for permanent removal instead of moving it into hidden `.Trash-*` directories.
 
-## Paths
-
-- Persistent root: `/srv/qbittorrent`
-- qBittorrent config: `/srv/qbittorrent/config`
-- Completed downloads: `/srv/qbittorrent/downloads`
-- Incomplete downloads: `/srv/qbittorrent/incomplete`
-- Stack: `/opt/torrent-to-direct-download`
-- Generated Nginx main config: `/opt/torrent-to-direct-download/nginx/nginx.conf`
-- Generated Nginx site config: `/opt/torrent-to-direct-download/nginx/conf.d/default.conf`
-- Credentials: `/root/qbittorrent-credentials.txt`
-- Error report: `/root/torrent-to-direct-download-error.log`
-
-## Status / diagnostics
+To inspect existing disk usage:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --status
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
+sudo ttdd --disk-check
 ```
 
-## Tests
+To remove old `.Trash-*` data after reviewing it:
 
 ```bash
-sudo bash tests/static-tests.sh
+sudo ttdd --purge-trash
 ```
 
-The static suite validates Bash syntax, HTTP/HTTPS Compose generation, the high-throughput Nginx profile, raised `nofile`/backlog settings, absence of Nginx rate/connection limiting directives, qBittorrent permanent-delete behavior, password-only reset behavior, and persisted environment loading.
+The cleanup command asks for confirmation before permanent deletion.
 
-Real certificate issuance and a real internet throughput benchmark are intentionally not performed by the static test suite.
+## HTTPS
 
-See `CHANGELOG.md`, `REVIEW.md`, and `TEST-RESULTS.md` for more detail.
+Enable HTTPS at any time:
+
+```bash
+sudo ttdd --enable-ssl
+```
+
+Disable it and return to HTTP-only mode:
+
+```bash
+sudo ttdd --disable-ssl
+```
+
+A valid existing certificate is reused when possible. Certbot renewal dry-run is not executed on every installation.
+
+To run the renewal dry-run manually while applying HTTPS configuration:
+
+```bash
+sudo env RUN_RENEWAL_DRY_RUN=1 ttdd --enable-ssl
+```
+
+## Important files
+
+```text
+/usr/local/bin/ttdd                         local management command
+/root/qbittorrent-credentials.txt          qBittorrent login details
+/root/qbittorrent-download-info.txt        direct-download information
+/root/qbittorrent-ip-ssl-info.txt          HTTPS certificate information
+/root/torrent-to-direct-download-error.log last installer diagnostic report
+```
+
+## Help
+
+```bash
+sudo ttdd --help
+```
