@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0.2 — 2026-08-17
+
+Documentation / copy-paste command release.
+
+### Changed
+- Updated both Persian and English READMEs so installation and all installer management actions run directly from the official Raw `main` URL.
+- Standardized the exact installer URL as `https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh`.
+- Added ready-to-copy commands for install/update, SSL enable/disable, password reset, disk check, trash purge, status, and Certbot renewal dry-run.
+- No runtime behavior or Nginx/qBittorrent configuration was changed from v3.0.1.
+
 ## 3.0.1 — 2026-08-17
 
 High-throughput direct-download release.

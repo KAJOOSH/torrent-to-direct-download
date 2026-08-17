@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-# torrent-to-direct-download v3.0.1
+# torrent-to-direct-download v3.0.2
 # qBittorrent + Nginx + optional Let's Encrypt IP SSL for Ubuntu.
 #
 # Safety goals:
@@ -12,7 +12,7 @@ umask 077
 # - persistent data is never removed by install/update
 # - no Docker volume removal and no recursive chmod/chown over large downloads
 
-SCRIPT_VERSION="3.0.1"
+SCRIPT_VERSION="3.0.2"
 STACK_NAME="torrent-to-direct-download"
 STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
 COMPOSE_FILE="${STACK_DIR}/compose.yaml"

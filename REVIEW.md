@@ -1,4 +1,4 @@
-# Review Notes — Upstream 2.2.1 to 3.0.1
+# Review Notes — Upstream 2.2.1 to 3.0.0
 
 The upstream installer was reviewed as a complete installation flow, not only for the three reported symptoms.
 
@@ -43,34 +43,3 @@ Then remove it permanently if it is the data you already intended to delete:
 ```bash
 sudo bash install.sh --purge-trash
 ```
-
-
-## Nginx direct-download performance review — v3.0.1
-
-The v3.0.0 site configuration did not contain `limit_rate`, `limit_conn`, or `limit_req`, so it did not intentionally throttle download bandwidth. However, it still relied on the official image main `nginx.conf` and process limits. Under high concurrency, the default worker/file-descriptor ceilings can become the first artificial bottleneck before disk or network capacity is reached.
-
-v3.0.1 therefore owns the main Nginx configuration and explicitly raises capacity while avoiding per-client throttles:
-
-```nginx
-worker_processes auto;
-worker_rlimit_nofile 262144;
-
-events {
-    worker_connections 65535;
-    multi_accept on;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    limit_rate 0;
-    access_log off;
-}
-```
-
-The Nginx container also receives a Docker `nofile` soft/hard limit of `262144`, `net.core.somaxconn=65535`, and `listen ... reuseport backlog=65535`. No `limit_conn` or `limit_req` zone/directive is generated. Byte-range support remains enabled for segmented download managers.
-
-`open_file_cache` is intentionally not enabled in this performance profile: caching open descriptors can delay final disk-space release after a file is unlinked, which conflicts with the project's storage/deletion goals.
-
-The large numerical limits are ceilings, not guaranteed sustainable throughput. The effective limit remains the NIC, disk/filesystem, CPU/TLS cost, kernel/network path, Docker networking, and the remote client.

@@ -1,4 +1,4 @@
-# Torrent to Direct Download — v3.0.1
+# Torrent to Direct Download — v3.0.2
 
 Ubuntu installer for **qBittorrent + Nginx**, with optional Let's Encrypt IP SSL and a high-throughput direct-download profile.
 
@@ -12,12 +12,17 @@ This branch is a safety, storage and performance rewrite of upstream 2.2.1. Exis
 - qBittorrent file deletion is configured for permanent deletion instead of hidden `.Trash-*` retention.
 - Nginx reads the real completed-download directory through a read-only bind mount; it does **not** keep a second copy.
 - Complete/incomplete downloads live below one primary `/data` mount to avoid cross-mount copy behavior.
-- Nginx direct downloads use an explicit high-throughput/no-rate-limit profile in v3.0.1.
+- Nginx direct downloads use an explicit high-throughput/no-rate-limit profile in v3.0.2.
 
 ## Install / update
 
+> **All management commands in this README run directly from the official Raw `main` installer**, so you do not need to download `install.sh` or clone the repository first. The URL used throughout is:
+>
+> `https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh`
+
+
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash
 ```
 
 On the first install, the first important question is whether SSL/HTTPS should be enabled. Choose **No** for a faster HTTP-only setup or **Yes** to configure Let's Encrypt IP SSL.
@@ -25,13 +30,13 @@ On the first install, the first important question is whether SSL/HTTPS should b
 Non-interactive choices:
 
 ```bash
-sudo bash install.sh --disable-ssl
-sudo bash install.sh --enable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --enable-ssl
 ```
 
 Running the newer installer again is the supported update path. Existing downloads, qBittorrent resume data and configuration are preserved/backed up before mutation.
 
-## High-speed direct downloads — v3.0.1
+## High-speed direct downloads — v3.0.2
 
 The generated Nginx configuration intentionally contains **no per-IP connection limit, no request-rate limit and no response bandwidth limit**.
 
@@ -70,13 +75,13 @@ sudo docker exec ttdd-nginx sh -c 'ulimit -n; nginx -T 2>&1 | grep -E "worker_co
 ## Password reset — no reinstall
 
 ```bash
-sudo bash install.sh --reset-password
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --reset-password
 ```
 
 To choose the new password yourself:
 
 ```bash
-sudo env QBT_PASSWORD='your-strong-password' bash install.sh --reset-password
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env QBT_PASSWORD='your-strong-password' bash -s -- --reset-password
 ```
 
 The reset path does not run apt, pull images, reinstall Docker, rewrite Nginx/SSL, or touch downloaded content.
@@ -84,7 +89,7 @@ The reset path does not run apt, pull images, reinstall Docker, rewrite Nginx/SS
 The legacy form is also accepted:
 
 ```bash
-sudo env RESET_QBT_PASSWORD=1 bash install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RESET_QBT_PASSWORD=1 bash
 ```
 
 ## Disk-space diagnosis and old qBittorrent trash
@@ -92,13 +97,13 @@ sudo env RESET_QBT_PASSWORD=1 bash install.sh
 Check where space is being used:
 
 ```bash
-sudo bash install.sh --disk-check
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
 ```
 
 If old `.Trash-*` data is shown and it contains files you already intended to delete:
 
 ```bash
-sudo bash install.sh --purge-trash
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --purge-trash
 ```
 
 Future qBittorrent deletes are configured for permanent removal with `Session\TorrentContentRemoveOption=Delete` when **also delete files** is selected.
@@ -121,7 +126,7 @@ Legacy `/downloads` and `/incomplete` mounts remain only as compatibility aliase
 A full Certbot renewal dry-run is no longer performed on every installation. It is opt-in:
 
 ```bash
-sudo env RUN_RENEWAL_DRY_RUN=1 bash install.sh --enable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RUN_RENEWAL_DRY_RUN=1 bash -s -- --enable-ssl
 ```
 
 A still-valid existing certificate is reused. SSL-disabled installations do not create Certbot renewal services or expose port 443.
@@ -141,8 +146,8 @@ A still-valid existing certificate is reused. SSL-disabled installations do not 
 ## Status / diagnostics
 
 ```bash
-sudo bash install.sh --status
-sudo bash install.sh --disk-check
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --status
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
 ```
 
 ## Tests

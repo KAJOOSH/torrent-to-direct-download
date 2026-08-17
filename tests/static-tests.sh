@@ -74,4 +74,4 @@ ENV
 TTDD_SOURCE_ONLY=1 SCRIPT="${SCRIPT}" STACK_DIR="${TMP}/env-stack" WEBUI_PORT=8282 \
 bash -c 'set --; source "$SCRIPT"; [[ "$DATA_DIR" == *persisted-data ]]; [[ "$PUBLIC_IP" == 1.1.1.1 ]]; [[ "$ENABLE_SSL" == 1 ]]; [[ "$WEBUI_PORT" == 8282 ]]; [[ "$NGINX_MAIN_CONF" == *custom-nginx.conf ]]'
 
-printf 'All static tests passed for v3.0.1.\n'
+printf 'All static tests passed for v3.0.2.\n'

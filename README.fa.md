@@ -1,8 +1,8 @@
 <div dir="rtl">
 
-# تبدیل تورنت به دانلود مستقیم — نسخه 3.0.1
+# تبدیل تورنت به دانلود مستقیم — نسخه 3.0.2
 
-این نسخه بازطراحی اسکریپت 2.2.1 برای **qBittorrent + Nginx** است و علاوه بر اصلاح Reset Password، SSL و مشکل فضای دیسک، در نسخه 3.0.1 تنظیمات دانلود مستقیم Nginx نیز برای سرعت و تعداد اتصال بالا بهینه شده است.
+این نسخه بازطراحی اسکریپت 2.2.1 برای **qBittorrent + Nginx** است و علاوه بر اصلاح Reset Password، SSL و مشکل فضای دیسک، در نسخه 3.0.2 تنظیمات دانلود مستقیم Nginx نیز برای سرعت و تعداد اتصال بالا بهینه شده است.
 
 داده‌های موجود در `/srv/qbittorrent` هنگام نصب/آپدیت حذف نمی‌شوند.
 
@@ -14,12 +14,17 @@
 - حذف فایل qBittorrent روی حذف دائمی تنظیم شده تا فایل‌ها در `.Trash-*` باقی نمانند.
 - Nginx همان پوشه واقعی دانلود را به‌صورت read-only می‌بیند و فایل را دوباره کپی نمی‌کند.
 - complete و incomplete زیر یک mount اصلی قرار گرفته‌اند تا هنگام تکمیل دانلود copy اضافی بین mountها رخ ندهد.
-- در نسخه **3.0.1** محدودیت مصنوعی سرعت/تعداد connection برای دانلود مستقیم Nginx وجود ندارد و سقف‌های پیش‌فرض کوچک Nginx نیز افزایش یافته‌اند.
+- در نسخه **3.0.2** محدودیت مصنوعی سرعت/تعداد connection برای دانلود مستقیم Nginx وجود ندارد و سقف‌های پیش‌فرض کوچک Nginx نیز افزایش یافته‌اند.
 
 ## نصب / آپدیت
 
+> **دستورهای این README مستقیماً از Raw رسمی شاخه `main` اجرا می‌شوند**؛ بنابراین لازم نیست ابتدا فایل `install.sh` را دانلود یا Repository را Clone کنید. آدرس مورد استفاده در همه فرمان‌های مدیریتی:
+>
+> `https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh`
+
+
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash
 ```
 
 در اولین نصب، قبل از عملیات سنگین از شما پرسیده می‌شود که **SSL/HTTPS لازم است یا خیر**.
@@ -27,13 +32,13 @@ sudo bash install.sh
 انتخاب مستقیم:
 
 ```bash
-sudo bash install.sh --disable-ssl
-sudo bash install.sh --enable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --enable-ssl
 ```
 
 برای آپدیت نیز همین نسخه جدید `install.sh` را دوباره اجرا کنید. دانلودها و اطلاعات resume qBittorrent حفظ می‌شوند.
 
-## دانلود مستقیم Nginx با بالاترین ظرفیت — جدید در 3.0.1
+## دانلود مستقیم Nginx با بالاترین ظرفیت — جدید در 3.0.2
 
 در تنظیم تولیدشده Nginx هیچ‌کدام از محدودکننده‌های زیر اعمال نشده‌اند:
 
@@ -79,13 +84,13 @@ sudo docker exec ttdd-nginx sh -c 'ulimit -n; nginx -T 2>&1 | grep -E "worker_co
 ## ریست رمز بدون نصب مجدد
 
 ```bash
-sudo bash install.sh --reset-password
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --reset-password
 ```
 
 برای رمز دلخواه:
 
 ```bash
-sudo env QBT_PASSWORD='your-strong-password' bash install.sh --reset-password
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env QBT_PASSWORD='your-strong-password' bash -s -- --reset-password
 ```
 
 این عملیات apt، Docker، Nginx، SSL و فایل‌های دانلودی را دست‌کاری نمی‌کند.
@@ -93,7 +98,7 @@ sudo env QBT_PASSWORD='your-strong-password' bash install.sh --reset-password
 روش قدیمی نیز برای سازگاری پشتیبانی می‌شود:
 
 ```bash
-sudo env RESET_QBT_PASSWORD=1 bash install.sh
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RESET_QBT_PASSWORD=1 bash
 ```
 
 ## مشکل فضای دیسک بعد از حذف فایل
@@ -101,13 +106,13 @@ sudo env RESET_QBT_PASSWORD=1 bash install.sh
 برای بررسی فضای مصرف‌شده:
 
 ```bash
-sudo bash install.sh --disk-check
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
 ```
 
 اگر `.Trash-*` قدیمی پیدا شد و مطمئن هستید همان فایل‌هایی هستند که قبلاً قصد حذف‌شان را داشته‌اید:
 
 ```bash
-sudo bash install.sh --purge-trash
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --purge-trash
 ```
 
 قبل از حذف دائمی تأیید گرفته می‌شود.
@@ -138,7 +143,7 @@ Session\TorrentContentRemoveOption=Delete
 `certbot renew --dry-run` دیگر هنگام هر نصب اجرا نمی‌شود. در صورت نیاز:
 
 ```bash
-sudo env RUN_RENEWAL_DRY_RUN=1 bash install.sh --enable-ssl
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo env RUN_RENEWAL_DRY_RUN=1 bash -s -- --enable-ssl
 ```
 
 اگر Certificate موجود هنوز معتبر باشد دوباره استفاده می‌شود. در حالت SSL خاموش نیز سرویس‌های Certbot و پورت 443 ایجاد نمی‌شوند.
@@ -160,8 +165,8 @@ sudo env RUN_RENEWAL_DRY_RUN=1 bash install.sh --enable-ssl
 ## وضعیت و عیب‌یابی
 
 ```bash
-sudo bash install.sh --status
-sudo bash install.sh --disk-check
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --status
+curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/refs/heads/main/install.sh | sudo bash -s -- --disk-check
 ```
 
 ## اجرای تست‌ها
