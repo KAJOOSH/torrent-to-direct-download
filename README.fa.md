@@ -1,111 +1,179 @@
 <div dir="rtl">
 
-# تبدیل تورنت به دانلود مستقیم
+# تبدیل تورنت به دانلود مستقیم — نسخه 3.0.1
 
-[English](README.md)
+این نسخه بازطراحی اسکریپت 2.2.1 برای **qBittorrent + Nginx** است و علاوه بر اصلاح Reset Password، SSL و مشکل فضای دیسک، در نسخه 3.0.1 تنظیمات دانلود مستقیم Nginx نیز برای سرعت و تعداد اتصال بالا بهینه شده است.
 
-این پروژه یک سرور Ubuntu را به سرور ساده‌ی **دانلود تورنت و ارائه لینک مستقیم** تبدیل می‌کند.
+داده‌های موجود در `/srv/qbittorrent` هنگام نصب/آپدیت حذف نمی‌شوند.
 
-لینک Magnet یا فایل Torrent را داخل qBittorrent وارد می‌کنید؛ سرور فایل را دانلود می‌کند و پس از کامل‌شدن، فایل از طریق HTTP و HTTPS معتبر در اختیار کاربران قرار می‌گیرد.
+## مهم‌ترین اصلاحات نسخه 3
 
-## سرویس‌های Docker
+- Reset Password دیگر کل سیستم را دوباره نصب نمی‌کند.
+- SSL اختیاری است و در ابتدای نصب از شما سؤال می‌شود.
+- تست کند `certbot renew --dry-run` به‌صورت پیش‌فرض اجرا نمی‌شود.
+- حذف فایل qBittorrent روی حذف دائمی تنظیم شده تا فایل‌ها در `.Trash-*` باقی نمانند.
+- Nginx همان پوشه واقعی دانلود را به‌صورت read-only می‌بیند و فایل را دوباره کپی نمی‌کند.
+- complete و incomplete زیر یک mount اصلی قرار گرفته‌اند تا هنگام تکمیل دانلود copy اضافی بین mountها رخ ندهد.
+- در نسخه **3.0.1** محدودیت مصنوعی سرعت/تعداد connection برای دانلود مستقیم Nginx وجود ندارد و سقف‌های پیش‌فرض کوچک Nginx نیز افزایش یافته‌اند.
 
-تمام سرویس‌های اصلی داخل Docker Compose اجرا می‌شوند:
-
-- Image رسمی و پایدار qBittorrent-nox
-- Image رسمی Nginx برای دانلود مستقیم
-- Image رسمی Certbot برای SSL معتبر Let’s Encrypt روی IP عمومی
-- تمدید خودکار گواهی SSL
-
-اگر Docker و Docker Compose نصب نباشند، اسکریپت آن‌ها را از مخزن رسمی Docker نصب می‌کند.
-
-## پیش‌نیازها
-
-- Ubuntu نسخه 22.04، 24.04، 25.10 یا 26.04
-- دسترسی root
-- IPv4 عمومی
-- بازبودن TCP پورت‌های `80`، `443` و `8080`
-- بازبودن TCP و UDP پورت `49160` برای تورنت
-- Port Forward در صورت قرارداشتن سرور پشت NAT
-
-پورت‌ها باید در فایروال پنل VPS یا شرکت میزبان نیز باز باشند.
-
-## نصب سریع
+## نصب / آپدیت
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
-  -o /tmp/install.sh \
-  && sudo bash /tmp/install.sh
+sudo bash install.sh
 ```
 
-نصب پیشنهادی همراه ایمیل Let’s Encrypt:
+در اولین نصب، قبل از عملیات سنگین از شما پرسیده می‌شود که **SSL/HTTPS لازم است یا خیر**.
+
+انتخاب مستقیم:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
-  -o /tmp/install.sh \
-  && sudo env \
-    LETSENCRYPT_EMAIL=admin@example.com \
-    bash /tmp/install.sh
+sudo bash install.sh --disable-ssl
+sudo bash install.sh --enable-ssl
 ```
 
-برای سرور پشت NAT، IP عمومی را مشخص کنید:
+برای آپدیت نیز همین نسخه جدید `install.sh` را دوباره اجرا کنید. دانلودها و اطلاعات resume qBittorrent حفظ می‌شوند.
 
-```bash
-sudo env \
-  PUBLIC_IP=YOUR_PUBLIC_IP \
-  LETSENCRYPT_EMAIL=admin@example.com \
-  bash /tmp/install.sh
-```
+## دانلود مستقیم Nginx با بالاترین ظرفیت — جدید در 3.0.1
 
-## آدرس‌ها پس از نصب
+در تنظیم تولیدشده Nginx هیچ‌کدام از محدودکننده‌های زیر اعمال نشده‌اند:
+
+- محدودیت سرعت پاسخ برای هر دانلود
+- محدودیت connection بر اساس IP
+- محدودیت تعداد request بر اساس IP
+
+تنظیمات Performance پیش‌فرض:
 
 ```text
-پنل qBittorrent:
-http://PUBLIC_IP:8080
-
-دانلود مستقیم:
-http://PUBLIC_IP/
-https://PUBLIC_IP/
+worker_processes auto
+worker_connections 65535 برای هر Worker
+worker_rlimit_nofile 262144
+Docker nofile soft/hard = 262144
+net.core.somaxconn = 65535
+listen reuseport backlog=65535
+limit_rate 0
+sendfile on
+tcp_nopush on
+tcp_nodelay on
+multi_accept on
+access_log off
 ```
 
-نام کاربری و رمز تولیدشده qBittorrent در این فایل ذخیره می‌شود:
+بنابراین Nginx **هیچ Rate Limit مصنوعی** روی فایل‌های دانلودی قرار نمی‌دهد. دانلود منیجرهایی مانند IDM و aria2 نیز می‌توانند از درخواست‌های Range و چند connection هم‌زمان استفاده کنند.
+
+خاموش‌بودن `access_log` نیز برای این است که در دانلودهای سنگین و تعداد درخواست بالا، نوشتن مداوم لاگ تبدیل به I/O اضافی روی دیسک نشود. Error log همچنان فعال است.
+
+توجه: این اعداد سقف ظرفیت هستند؛ سرعت واقعی همچنان به سرعت پورت شبکه سرور، مسیر اینترنت، دیسک، CPU/TLS، شبکه Docker و اینترنت کاربر بستگی دارد. افزایش connection باعث نمی‌شود یک سرور ضعیف به‌صورت جادویی هزاران انتقال سنگین را تحمل کند، اما محدودیت کوچک پیش‌فرض Nginx دیگر مانع شما نخواهد بود.
+
+برای دیدن تنظیم واقعی Nginx:
 
 ```bash
-sudo cat /root/qbittorrent-credentials.txt
+sudo docker exec ttdd-nginx nginx -T
 ```
 
-## به‌روزرسانی
-
-همان اسکریپت نصب را دوباره اجرا کنید. Imageهای رسمی جدید دریافت می‌شوند و فایل‌های دانلودشده، وضعیت تورنت‌ها و رمز فعلی حفظ خواهند شد.
-
-## بازنشانی رمز qBittorrent
+برای بررسی سریع محدودیت‌های مهم:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KAJOOSH/torrent-to-direct-download/main/install.sh \
-  -o /tmp/install.sh \
-  && sudo env RESET_QBT_PASSWORD=1 bash /tmp/install.sh
+sudo docker exec ttdd-nginx sh -c 'ulimit -n; nginx -T 2>&1 | grep -E "worker_connections|worker_rlimit_nofile|limit_rate|reuseport|sendfile|multi_accept"'
 ```
 
-## نکات مهم
+## ریست رمز بدون نصب مجدد
 
-- اگر نصب خطا بدهد، گزارش کامل در `/root/torrent-to-direct-download-error.log` ذخیره می‌شود.
-- در زمان خطا Containerها برای بررسی لاگ و Mountها روشن می‌مانند؛ اجرای دوباره اسکریپت آن‌ها را امن جایگزین می‌کند.
-- فایل‌های کامل‌شده روی پورت‌های `80` و `443` عمومی و بدون رمز هستند.
-- برای تمدید SSL، پورت `80` باید از اینترنت در دسترس باقی بماند.
-- پنل qBittorrent دارای رمز تصادفی قوی است، اما روی پورت `8080` با HTTP ارائه می‌شود.
-- فقط محتوایی را دانلود یا منتشر کنید که اجازه قانونی استفاده و اشتراک‌گذاری آن را دارید.
+```bash
+sudo bash install.sh --reset-password
+```
 
-## هدف پروژه
+برای رمز دلخواه:
 
-هدف پروژه ایجاد یک سرور کوچک و شخصی است که فایل را از شبکه BitTorrent دریافت کند و پس از تکمیل دانلود، همان فایل را به‌صورت لینک مستقیم معمولی در اختیار کاربران، مرورگرها، پخش‌کننده‌ها یا دانلود منیجرها قرار دهد.
+```bash
+sudo env QBT_PASSWORD='your-strong-password' bash install.sh --reset-password
+```
+
+این عملیات apt، Docker، Nginx، SSL و فایل‌های دانلودی را دست‌کاری نمی‌کند.
+
+روش قدیمی نیز برای سازگاری پشتیبانی می‌شود:
+
+```bash
+sudo env RESET_QBT_PASSWORD=1 bash install.sh
+```
+
+## مشکل فضای دیسک بعد از حذف فایل
+
+برای بررسی فضای مصرف‌شده:
+
+```bash
+sudo bash install.sh --disk-check
+```
+
+اگر `.Trash-*` قدیمی پیدا شد و مطمئن هستید همان فایل‌هایی هستند که قبلاً قصد حذف‌شان را داشته‌اید:
+
+```bash
+sudo bash install.sh --purge-trash
+```
+
+قبل از حذف دائمی تأیید گرفته می‌شود.
+
+برای حذف‌های جدید نیز qBittorrent روی این حالت تنظیم می‌شود:
+
+```text
+Session\TorrentContentRemoveOption=Delete
+```
+
+یعنی وقتی گزینه حذف فایل‌های تورنت را انتخاب می‌کنید، محتوا به Trash مخفی منتقل نمی‌شود.
+
+## چرا Nginx فضا را دو برابر نمی‌کند؟
+
+مسیر `/srv/qbittorrent/downloads` به‌صورت **read-only bind mount** داخل Nginx قرار می‌گیرد. Bind mount فقط همان فایل میزبان را داخل کانتینر نمایش می‌دهد؛ کپی دوم ایجاد نمی‌کند.
+
+مسیر دانلودهای جدید در qBittorrent:
+
+```text
+/data/downloads
+/data/incomplete
+```
+
+مسیرهای قدیمی `/downloads` و `/incomplete` فقط برای سازگاری تورنت‌های قبلی باقی مانده‌اند و به همان داده میزبان اشاره می‌کنند.
+
+## SSL سریع‌تر و اختیاری
+
+`certbot renew --dry-run` دیگر هنگام هر نصب اجرا نمی‌شود. در صورت نیاز:
+
+```bash
+sudo env RUN_RENEWAL_DRY_RUN=1 bash install.sh --enable-ssl
+```
+
+اگر Certificate موجود هنوز معتبر باشد دوباره استفاده می‌شود. در حالت SSL خاموش نیز سرویس‌های Certbot و پورت 443 ایجاد نمی‌شوند.
+
+## مسیرهای اصلی
+
+```text
+/srv/qbittorrent                         داده‌های اصلی
+/srv/qbittorrent/config                  تنظیمات qBittorrent
+/srv/qbittorrent/downloads               دانلودهای کامل
+/srv/qbittorrent/incomplete              دانلودهای ناقص
+/opt/torrent-to-direct-download          فایل‌های Stack
+/opt/torrent-to-direct-download/nginx/nginx.conf
+/opt/torrent-to-direct-download/nginx/conf.d/default.conf
+/root/qbittorrent-credentials.txt        اطلاعات ورود
+/root/torrent-to-direct-download-error.log گزارش خطا
+```
+
+## وضعیت و عیب‌یابی
+
+```bash
+sudo bash install.sh --status
+sudo bash install.sh --disk-check
+```
+
+## اجرای تست‌ها
+
+```bash
+sudo bash tests/static-tests.sh
+```
+
+تست‌ها syntax اسکریپت، Compose حالت HTTP و HTTPS، تنظیم Performance جدید Nginx، `nofile` و backlog بالا، نبودن `limit_conn`/`limit_req`، حذف دائمی qBittorrent، مستقل‌بودن Reset Password و بارگذاری `.env` را بررسی می‌کنند.
+
+تست واقعی سرعت اینترنت و صدور واقعی Certificate داخل تست استاتیک انجام نمی‌شود.
+
+جزئیات کامل در `CHANGELOG.md`، `REVIEW.md` و `TEST-RESULTS.md` قرار دارد.
 
 </div>
-
-## اصلاح نسخه 2.2.1
-
-در نسخه 2.2.1 خطایی رفع شده که پس از موفقیت نصب سرویس‌ها و تست دانلود رخ
-می‌داد. اسکریپت دیگر برای خواندن شماره نسخه، یک پردازش دوم
-`qbittorrent-nox` اجرا نمی‌کند و از نسخه دریافت‌شده از Web API استفاده می‌کند.
-
-جمع‌آوری نسخه سرویس‌ها دیگر باعث شکست نصب نمی‌شود و گزارش خطا فرمان دقیق
-ناموفق و مسیر توابع Bash را نیز نمایش می‌دهد.

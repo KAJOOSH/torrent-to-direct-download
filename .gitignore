@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+.env
+*.user
+*.suo
+secrets.json
+TestResults/
+coverage/
+node_modules/
+dist/
+artifacts/
