@@ -1,4 +1,4 @@
-# Test Results — v3.0.3
+# Test Results — v3.0.4
 
 Date: 2026-08-17
 
@@ -25,3 +25,9 @@ Not executed in the build environment:
 - Internet throughput benchmarking
 
 The installer performs additional Compose, Nginx and qBittorrent runtime checks on the target Ubuntu server during installation.
+
+## v3.0.4 regression
+
+- Fresh install with no persisted `.env` and no caller-supplied `PUBLIC_IP`: passed.
+- Automatic public IPv4 detection after empty initialization: passed with a local stub.
+- `bash -n install.sh`: passed.

@@ -8,6 +8,21 @@ trap 'rm -rf "${TMP}"' EXIT
 bash -n "${SCRIPT}"
 "${SCRIPT}" --help >/dev/null
 
+# Regression: on a fresh install PUBLIC_IP is not supplied and there is no .env.
+# It must still be a defined empty variable under `set -u`, then auto-detection
+# must be able to populate it without an unbound-variable crash.
+TTDD_SOURCE_ONLY=1 SCRIPT="${SCRIPT}" STACK_DIR="${TMP}/fresh-stack" \
+bash -c '
+  set --
+  unset PUBLIC_IP || true
+  source "$SCRIPT"
+  [[ -v PUBLIC_IP ]]
+  [[ -z "$PUBLIC_IP" ]]
+  curl() { printf "8.8.8.8\n"; }
+  detect_public_ip >/dev/null
+  [[ "$PUBLIC_IP" == "8.8.8.8" ]]
+'
+
 # HTTP Compose + high-throughput Nginx generation.
 TTDD_SOURCE_ONLY=1 SCRIPT="${SCRIPT}" STACK_DIR="${TMP}/http-stack" DATA_DIR="${TMP}/http-data" PUBLIC_IP=8.8.8.8 ENABLE_SSL=0 \
 bash -c '
@@ -119,7 +134,7 @@ bash -c '
   source "$SCRIPT"
   install_local_command
   [[ -x "$LOCAL_INSTALLER" ]]
-  grep -Fq '\''SCRIPT_VERSION="3.0.3"'\'' "$LOCAL_INSTALLER"
+  grep -Fq '\''SCRIPT_VERSION="3.0.4"'\'' "$LOCAL_INSTALLER"
 '
 
 # Self-update validates and installs a newer remote script without an existing stack.
@@ -140,4 +155,4 @@ bash -c '
   grep -Fq '\''SCRIPT_VERSION="9.9.9"'\'' "$LOCAL_INSTALLER"
 '
 
-printf 'All static tests passed for v3.0.3.\n'
+printf 'All static tests passed for v3.0.4.\n'

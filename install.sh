@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-# torrent-to-direct-download v3.0.3
+# torrent-to-direct-download v3.0.4
 # qBittorrent + Nginx + optional Let's Encrypt IP SSL for Ubuntu.
 #
 # Safety goals:
@@ -12,7 +12,7 @@ umask 077
 # - persistent data is never removed by install/update
 # - no Docker volume removal and no recursive chmod/chown over large downloads
 
-SCRIPT_VERSION="3.0.3"
+SCRIPT_VERSION="3.0.4"
 STACK_NAME="torrent-to-direct-download"
 STACK_DIR="${STACK_DIR:-/opt/${STACK_NAME}}"
 COMPOSE_FILE="${STACK_DIR}/compose.yaml"
@@ -49,6 +49,11 @@ read_persisted_env() {
   done < "${ENV_FILE}"
 }
 read_persisted_env
+
+# PUBLIC_IP is intentionally empty on a fresh install and populated later by
+# detect_public_ip(). Initializing it here is required because this script uses
+# `set -u`; referencing an unset variable would otherwise abort before detection.
+PUBLIC_IP="${PUBLIC_IP:-}"
 
 DATA_DIR="${DATA_DIR:-/srv/qbittorrent}"
 QBT_CONFIG_DIR="${QBT_CONFIG_DIR:-${DATA_DIR}/config}"

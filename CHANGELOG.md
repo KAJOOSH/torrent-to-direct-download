@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.4 — 2026-08-18
+
+### Fixed
+
+- Fixed a fresh-install crash: `PUBLIC_IP: unbound variable` when no previous `.env` existed and `PUBLIC_IP` was not supplied manually.
+- `PUBLIC_IP` is now initialized safely before automatic IPv4 detection, so `set -u` cannot abort the installer at that stage.
+- Added a regression test that simulates a fresh install with no `PUBLIC_IP` and verifies automatic detection can populate it.
+
 ## 3.0.3 — 2026-08-17
 
 ### Added
